@@ -3,8 +3,16 @@ use serde_json::Value;
 pub mod bash;
 pub mod edit_file;
 pub mod glob;
+pub mod load_skill;
 pub mod read_file;
 pub mod write_file;
+
+pub use bash::Bash;
+pub use edit_file::EditFile;
+pub use glob::Glob;
+pub use load_skill::LoadSkill;
+pub use read_file::ReadFile;
+pub use write_file::WriteFile;
 
 pub trait ToolHandler {
     fn name(&self) -> &str;
@@ -17,7 +25,8 @@ pub trait ToolHandler {
 mod tests {
     use super::*;
     use crate::tools::{
-        bash::Bash, edit_file::EditFile, glob::Glob, read_file::ReadFile, write_file::WriteFile,
+        bash::Bash, edit_file::EditFile, glob::Glob, load_skill::LoadSkill, read_file::ReadFile,
+        write_file::WriteFile,
     };
 
     // 所有 handler 的 parameters() 都应是 object 类型（合法 JSON Schema 顶层）
@@ -29,6 +38,7 @@ mod tests {
             &WriteFile,
             &EditFile,
             &Glob,
+            &LoadSkill,
         ] {
             let params = h.parameters();
             assert!(
@@ -39,15 +49,17 @@ mod tests {
         }
     }
 
-    // 所有 handler 的 name 都非空且唯一（agent_loop 靠 name 分发）
+    // 所有 handler 的 name 都非空、唯一、且符合 snake_case
+    // （API 要求 function name 匹配 ^[a-zA-Z0-9_-]+$；空格会导致模型无法调用 / API 拒绝）
     #[test]
-    fn names_are_non_empty_and_unique() {
+    fn names_are_non_empty_unique_and_snake_case() {
         let names: Vec<&str> = [
             &Bash as &dyn ToolHandler,
             &ReadFile,
             &WriteFile,
             &EditFile,
             &Glob,
+            &LoadSkill,
         ]
         .into_iter()
         .map(|h| h.name())
@@ -55,5 +67,12 @@ mod tests {
         assert!(names.iter().all(|n| !n.is_empty()), "empty name: {names:?}");
         let unique: std::collections::HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "duplicate names: {names:?}");
+        for n in &names {
+            assert!(
+                n.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "name contains invalid chars (space/unicode etc.): {n}"
+            );
+        }
     }
 }

@@ -1,12 +1,10 @@
 mod chat_completions;
+mod skills;
 mod tools;
 
 use crate::{
     chat_completions::{FinishReason::ToolCalls, Function, Message, Request, Response, Tool},
-    tools::{
-        ToolHandler, bash::Bash, edit_file::EditFile, glob::Glob, read_file::ReadFile,
-        write_file::WriteFile,
-    },
+    tools::{Bash, EditFile, Glob, LoadSkill, ReadFile, ToolHandler, WriteFile},
 };
 use reqwest::Client;
 use serde_json::Value;
@@ -21,7 +19,11 @@ async fn main() {
         model: "deepseek-v4-flash".to_string(),
         messages: vec![
             Message::System {
-                content: "You are a helpful assistant.".to_string(),
+                content: format!(
+                    "You are a helpful assistant.\nSkills available:\n{}\nUse load_skill to get full details when needed.",
+                    skills::list_skills(&dirs::home_dir().unwrap().join(".nota-agent")),
+                )
+                .to_string(),
                 name: None,
             },
             Message::User {
@@ -68,6 +70,14 @@ async fn main() {
                     name: Glob.name().to_string(),
                     description: Glob.description().to_string(),
                     parameters: Glob.parameters(),
+                },
+            },
+            Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: LoadSkill.name().to_string(),
+                    description: LoadSkill.description().to_string(),
+                    parameters: LoadSkill.parameters(),
                 },
             },
         ]),
@@ -125,6 +135,7 @@ async fn agent_loop(client: Client, api_key: String, mut request: Request) {
                         "write_file" => WriteFile.run(&args),
                         "edit_file" => EditFile.run(&args),
                         "glob" => Glob.run(&args),
+                        "load_skill" => LoadSkill.run(&args),
                         other => format!("unknown tool: {other}"),
                     };
                     request.messages.push(Message::Tool {
