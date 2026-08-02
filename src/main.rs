@@ -1,10 +1,15 @@
 mod chat_completions;
+mod tools;
 
-use crate::chat_completions::{
-    FinishReason::ToolCalls, Function, Message, Request, Response, Tool,
+use crate::{
+    chat_completions::{FinishReason::ToolCalls, Function, Message, Request, Response, Tool},
+    tools::{
+        ToolHandler, bash::Bash, edit_file::EditFile, glob::Glob, read_file::ReadFile,
+        write_file::WriteFile,
+    },
 };
 use reqwest::Client;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 const LLM_URL: &str = "https://api.deepseek.com/chat/completions";
 
@@ -24,20 +29,48 @@ async fn main() {
                 name: None,
             },
         ],
-        tools: Some(vec![Tool {
-            tool_type: "function".to_string(),
-            function: Function {
-                name: "bash".to_string(),
-                description: "Run a bash command".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "The shell command to run." }
-                    },
-                    "required": ["command"]
-                }),
+        tools: Some(vec![
+            Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: Bash.name().to_string(),
+                    description: Bash.description().to_string(),
+                    parameters: Bash.parameters(),
+                },
             },
-        }]),
+            Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: ReadFile.name().to_string(),
+                    description: ReadFile.description().to_string(),
+                    parameters: ReadFile.parameters(),
+                },
+            },
+            Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: WriteFile.name().to_string(),
+                    description: WriteFile.description().to_string(),
+                    parameters: WriteFile.parameters(),
+                },
+            },
+            Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: EditFile.name().to_string(),
+                    description: EditFile.description().to_string(),
+                    parameters: EditFile.parameters(),
+                },
+            },
+            Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: Glob.name().to_string(),
+                    description: Glob.description().to_string(),
+                    parameters: Glob.parameters(),
+                },
+            },
+        ]),
     };
 
     let client = Client::new();
@@ -71,7 +104,7 @@ async fn agent_loop(client: Client, api_key: String, mut request: Request) {
             serde_json::to_string_pretty(&response).unwrap()
         );
 
-        if let Some(choice) = response.choices.get(0) {
+        if let Some(choice) = response.choices.first() {
             request.messages.push(Message::Assistant {
                 content: choice.message.content.clone(),
                 name: None,
@@ -85,26 +118,21 @@ async fn agent_loop(client: Client, api_key: String, mut request: Request) {
 
             if let Some(tool_calls) = &choice.message.tool_calls {
                 tool_calls.iter().for_each(|tool_call| {
-                    if tool_call.function.name == "bash" {
-                        let args: Value =
-                            serde_json::from_str(&tool_call.function.arguments).unwrap();
-                        let command = args.get("command").unwrap().as_str().unwrap();
-                        request.messages.push(Message::Tool {
-                            content: run_bash(command),
-                            tool_call_id: tool_call.id.clone(),
-                        });
-                    }
+                    let args: Value = serde_json::from_str(&tool_call.function.arguments).unwrap();
+                    let result = match tool_call.function.name.as_str() {
+                        "bash" => Bash.run(&args),
+                        "read_file" => ReadFile.run(&args),
+                        "write_file" => WriteFile.run(&args),
+                        "edit_file" => EditFile.run(&args),
+                        "glob" => Glob.run(&args),
+                        other => format!("unknown tool: {other}"),
+                    };
+                    request.messages.push(Message::Tool {
+                        content: result,
+                        tool_call_id: tool_call.id.clone(),
+                    });
                 });
             };
         }
     }
-}
-
-fn run_bash(command: &str) -> String {
-    let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(command)
-        .output()
-        .unwrap();
-    String::from_utf8(output.stdout).unwrap()
 }
