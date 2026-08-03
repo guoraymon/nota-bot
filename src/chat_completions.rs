@@ -586,8 +586,7 @@ mod tests {
             let resp: Response = serde_json::from_str(&raw)
                 .unwrap_or_else(|e| panic!("parse failed for {json_str}: {e}"));
             assert_eq!(
-                resp.choices[0].finish_reason,
-                variant,
+                resp.choices[0].finish_reason, variant,
                 "mismatch for finish_reason={json_str}"
             );
         }
@@ -623,10 +622,7 @@ mod tests {
         }"#;
         let resp: Response = serde_json::from_str(raw).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(
-            msg.reasoning_content.as_deref(),
-            Some("let me think...")
-        );
+        assert_eq!(msg.reasoning_content.as_deref(), Some("let me think..."));
         assert_eq!(msg.content.as_deref(), Some("answer"));
     }
 
@@ -683,10 +679,7 @@ mod tests {
 
         assert_eq!(tool_calls[1].id, "call_b");
         assert_eq!(tool_calls[1].function.name, "read_file");
-        assert_eq!(
-            tool_calls[1].function.arguments,
-            r#"{"path":"/tmp/x"}"#
-        );
+        assert_eq!(tool_calls[1].function.arguments, r#"{"path":"/tmp/x"}"#);
     }
 
     // 负面测试：Response 缺 usage 字段应反序列化失败。呼应上面的修复——usage 是必需字段，
@@ -708,6 +701,9 @@ mod tests {
         let result: Result<Response, _> = serde_json::from_str(raw);
         assert!(result.is_err(), "expected error when usage is missing");
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("usage"), "error should mention usage, got: {err}");
+        assert!(
+            err.contains("usage"),
+            "error should mention usage, got: {err}"
+        );
     }
 }
