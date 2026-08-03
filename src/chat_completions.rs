@@ -81,7 +81,7 @@ pub struct Response {
     model: String,
     system_fingerprint: String,
     object: String,
-    // usage: Usage,
+    usage: Usage,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,6 +136,16 @@ pub struct ResponseFunction {
 #[serde(rename_all = "snake_case")]
 enum Role {
     Assistant,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Usage {
+    completion_tokens: isize,
+    prompt_tokens: isize,
+    prompt_cache_hit_tokens: isize,
+    prompt_cache_miss_tokens: isize,
+    total_tokens: isize,
+    completion_tokens_details: Value,
 }
 
 #[cfg(test)]
@@ -219,7 +229,15 @@ mod tests {
             "created": 1700000000,
             "model": "deepseek-chat",
             "system_fingerprint": "fp_1",
-            "object": "chat.completion"
+            "object": "chat.completion",
+            "usage": {
+                "completion_tokens": 12,
+                "prompt_tokens": 34,
+                "prompt_cache_hit_tokens": 10,
+                "prompt_cache_miss_tokens": 24,
+                "total_tokens": 46,
+                "completion_tokens_details": {"reasoning_tokens": 8}
+            }
         }"#;
         let resp: Response = serde_json::from_str(raw).unwrap();
         assert_eq!(resp.id, "chatcmpl-1");
@@ -249,7 +267,15 @@ mod tests {
             "created": 1,
             "model": "m",
             "system_fingerprint": "",
-            "object": "chat.completion"
+            "object": "chat.completion",
+            "usage": {
+                "completion_tokens": 12,
+                "prompt_tokens": 34,
+                "prompt_cache_hit_tokens": 10,
+                "prompt_cache_miss_tokens": 24,
+                "total_tokens": 46,
+                "completion_tokens_details": {"reasoning_tokens": 8}
+            }
         }"#;
         let resp: Response = serde_json::from_str(raw).unwrap();
         let msg = &resp.choices[0].message;
@@ -293,6 +319,33 @@ mod tests {
         assert!(json.contains("command"), "got: {json}");
     }
 
+    // assistant 同时带 content 和 tool_calls 的序列化：真实 API 常返回既有文本又有工具调用
+    // 的消息，需要确保两个字段都能一起正确输出
+    #[test]
+    fn serialize_assistant_with_content_and_tool_calls() {
+        let req = Request {
+            model: "deepseek-chat".to_string(),
+            messages: vec![Message::Assistant {
+                content: Some("let me run that for you".to_string()),
+                name: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_abc".to_string(),
+                    tool_call_type: ToolCallType::Function,
+                    function: ResponseFunction {
+                        name: "bash".to_string(),
+                        arguments: r#"{"command":"ls"}"#.to_string(),
+                    },
+                }]),
+            }],
+            tools: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""role":"assistant""#), "got: {json}");
+        assert!(json.contains("let me run that for you"), "got: {json}");
+        assert!(json.contains(r#""tool_calls""#), "got: {json}");
+        assert!(json.contains(r#""id":"call_abc""#), "got: {json}");
+    }
+
     // assistant 的 tool_calls 为 None 时整键不应出现（skip_serializing_if 生效）
     #[test]
     fn serialize_assistant_omits_tool_calls_when_none() {
@@ -323,7 +376,10 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""role":"tool""#), "got: {json}");
         assert!(json.contains(r#""tool_call_id":"call_abc""#), "got: {json}");
-        assert!(json.contains(r#""content":"command output""#), "got: {json}");
+        assert!(
+            json.contains(r#""content":"command output""#),
+            "got: {json}"
+        );
     }
 
     // Tool 定义序列化时字段名应是 "type" 而非 "tool_type"
@@ -347,11 +403,58 @@ mod tests {
         assert!(!json.contains(r#""tool_type""#), "got: {json}");
     }
 
+    // Tool 定义往返无损：parameters 是非平凡 JSON 对象时也要保证序列化/反序列化不丢字段
+    // （Tool 没 derive PartialEq，所以逐字段断言而非整体 assert_eq）
+    #[test]
+    fn serialize_deserialize_tool_definition_roundtrips() {
+        let params = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"}
+            },
+            "required": ["path"]
+        });
+        let tool = Tool {
+            tool_type: "function".to_string(),
+            function: Function {
+                description: "run a shell command".to_string(),
+                name: "bash".to_string(),
+                parameters: params.clone(),
+            },
+        };
+        let json = serde_json::to_string(&tool).unwrap();
+        let parsed: Tool = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tool_type, tool.tool_type);
+        assert_eq!(parsed.function.name, tool.function.name);
+        assert_eq!(parsed.function.description, tool.function.description);
+        assert_eq!(parsed.function.parameters, params);
+    }
+
     // tools 为 None 时请求体不应出现 "tools" 键（skip_serializing_if 生效）
     #[test]
     fn serialize_request_omits_tools_when_none() {
         let json = serde_json::to_string(&sample_request()).unwrap();
         assert!(!json.contains(r#""tools""#), "got: {json}");
+    }
+
+    // tools 为 Some 时请求体应出现 "tools" 键：与上一条成对，坐实 skip_serializing_if 仅在
+    // None 时跳过，Some 时正常输出
+    #[test]
+    fn serialize_request_includes_tools_when_some() {
+        let req = Request {
+            model: "deepseek-chat".to_string(),
+            messages: vec![],
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    description: "run".to_string(),
+                    name: "bash".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+            }]),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""tools""#), "got: {json}");
     }
 
     // 解析带 tool_calls 的响应：finish_reason=tool_calls 是 agent_loop 决定走工具分支的信号
@@ -378,7 +481,15 @@ mod tests {
             "created": 2,
             "model": "deepseek-chat",
             "system_fingerprint": "",
-            "object": "chat.completion"
+            "object": "chat.completion",
+            "usage": {
+                "completion_tokens": 12,
+                "prompt_tokens": 34,
+                "prompt_cache_hit_tokens": 10,
+                "prompt_cache_miss_tokens": 24,
+                "total_tokens": 46,
+                "completion_tokens_details": {"reasoning_tokens": 8}
+            }
         }"#;
         let resp: Response = serde_json::from_str(raw).unwrap();
         let choice = &resp.choices[0];
@@ -395,5 +506,208 @@ mod tests {
         assert!(matches!(tc.tool_call_type, ToolCallType::Function));
         assert_eq!(tc.function.name, "bash");
         assert_eq!(tc.function.arguments, r#"{"command":"pwd"}"#);
+    }
+
+    // ===== 反序列化补全覆盖 =====
+
+    // usage 各字段应被正确解析：token 计数和 cache 命中/未命中是成本核算的依据
+    #[test]
+    fn deserialize_usage_fields_parsed() {
+        let raw = r#"{
+            "id": "u1",
+            "choices": [{
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {"content": "hi", "role": "assistant"}
+            }],
+            "created": 1,
+            "model": "m",
+            "system_fingerprint": "",
+            "object": "chat.completion",
+            "usage": {
+                "completion_tokens": 12,
+                "prompt_tokens": 34,
+                "prompt_cache_hit_tokens": 10,
+                "prompt_cache_miss_tokens": 24,
+                "total_tokens": 46,
+                "completion_tokens_details": {"reasoning_tokens": 8}
+            }
+        }"#;
+        let resp: Response = serde_json::from_str(raw).unwrap();
+        let usage = &resp.usage;
+        assert_eq!(usage.completion_tokens, 12);
+        assert_eq!(usage.prompt_tokens, 34);
+        assert_eq!(usage.prompt_cache_hit_tokens, 10);
+        assert_eq!(usage.prompt_cache_miss_tokens, 24);
+        assert_eq!(usage.total_tokens, 46);
+        assert_eq!(
+            usage.completion_tokens_details["reasoning_tokens"],
+            serde_json::json!(8)
+        );
+    }
+
+    // FinishReason 全部 5 个变体的 rename 都应生效，特别是 content_filter 和
+    // insufficient_system_resource 这种多词组合，容易在 snake_case 改名时出错
+    #[test]
+    fn finish_reason_all_variants_roundtrip() {
+        let cases = [
+            (FinishReason::Stop, "stop"),
+            (FinishReason::Length, "length"),
+            (FinishReason::ContentFilter, "content_filter"),
+            (FinishReason::ToolCalls, "tool_calls"),
+            (
+                FinishReason::InsufficientSystemResource,
+                "insufficient_system_resource",
+            ),
+        ];
+        for (variant, json_str) in cases {
+            let raw = format!(
+                r#"{{
+                    "id": "x",
+                    "choices": [{{
+                        "finish_reason": "{json_str}",
+                        "index": 0,
+                        "message": {{"role": "assistant"}}
+                    }}],
+                    "created": 1,
+                    "model": "m",
+                    "system_fingerprint": "",
+                    "object": "chat.completion",
+                    "usage": {{
+                        "completion_tokens": 0,
+                        "prompt_tokens": 0,
+                        "prompt_cache_hit_tokens": 0,
+                        "prompt_cache_miss_tokens": 0,
+                        "total_tokens": 0,
+                        "completion_tokens_details": {{}}
+                    }}
+                }}"#
+            );
+            let resp: Response = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("parse failed for {json_str}: {e}"));
+            assert_eq!(
+                resp.choices[0].finish_reason,
+                variant,
+                "mismatch for finish_reason={json_str}"
+            );
+        }
+    }
+
+    // DeepSeek-reasoner 风格响应：message 里的 reasoning_content 应被解析为 Some
+    // （这是 reasoning model 的思维链字段，agent 可能用来展示思考过程）
+    #[test]
+    fn deserialize_message_with_reasoning_content() {
+        let raw = r#"{
+            "id": "r1",
+            "choices": [{
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning_content": "let me think..."
+                }
+            }],
+            "created": 1,
+            "model": "deepseek-reasoner",
+            "system_fingerprint": "",
+            "object": "chat.completion",
+            "usage": {
+                "completion_tokens": 12,
+                "prompt_tokens": 34,
+                "prompt_cache_hit_tokens": 10,
+                "prompt_cache_miss_tokens": 24,
+                "total_tokens": 46,
+                "completion_tokens_details": {"reasoning_tokens": 8}
+            }
+        }"#;
+        let resp: Response = serde_json::from_str(raw).unwrap();
+        let msg = &resp.choices[0].message;
+        assert_eq!(
+            msg.reasoning_content.as_deref(),
+            Some("let me think...")
+        );
+        assert_eq!(msg.content.as_deref(), Some("answer"));
+    }
+
+    // 并行工具调用：一条 assistant 消息带多个 tool_calls 是真实 API 行为（一次返回多个工具请求）
+    // 必须保证两个 call 各自的 id/name/arguments 都正确解析，不能只取第一个
+    #[test]
+    fn deserialize_response_with_multiple_tool_calls() {
+        let raw = r#"{
+            "id": "multi",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "call_a",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
+                        },
+                        {
+                            "id": "call_b",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/x\"}"}
+                        }
+                    ]
+                }
+            }],
+            "created": 9,
+            "model": "deepseek-chat",
+            "system_fingerprint": "",
+            "object": "chat.completion",
+            "usage": {
+                "completion_tokens": 12,
+                "prompt_tokens": 34,
+                "prompt_cache_hit_tokens": 10,
+                "prompt_cache_miss_tokens": 24,
+                "total_tokens": 46,
+                "completion_tokens_details": {"reasoning_tokens": 8}
+            }
+        }"#;
+        let resp: Response = serde_json::from_str(raw).unwrap();
+        let tool_calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls missing");
+        assert_eq!(tool_calls.len(), 2);
+
+        assert_eq!(tool_calls[0].id, "call_a");
+        assert_eq!(tool_calls[0].function.name, "bash");
+        assert_eq!(tool_calls[0].function.arguments, r#"{"command":"ls"}"#);
+
+        assert_eq!(tool_calls[1].id, "call_b");
+        assert_eq!(tool_calls[1].function.name, "read_file");
+        assert_eq!(
+            tool_calls[1].function.arguments,
+            r#"{"path":"/tmp/x"}"#
+        );
+    }
+
+    // 负面测试：Response 缺 usage 字段应反序列化失败。呼应上面的修复——usage 是必需字段，
+    // DeepSeek 总会返回，缺了就是协议异常，不应静默成功
+    #[test]
+    fn deserialize_response_without_usage_fails() {
+        let raw = r#"{
+            "id": "no-usage",
+            "choices": [{
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {"role": "assistant"}
+            }],
+            "created": 1,
+            "model": "m",
+            "system_fingerprint": "",
+            "object": "chat.completion"
+        }"#;
+        let result: Result<Response, _> = serde_json::from_str(raw);
+        assert!(result.is_err(), "expected error when usage is missing");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("usage"), "error should mention usage, got: {err}");
     }
 }
