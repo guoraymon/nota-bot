@@ -1,16 +1,15 @@
+mod agent;
 mod chat_completions;
 mod db;
 mod skills;
 mod tools;
 
 use crate::{
-    chat_completions::{FinishReason::ToolCalls, Function, Message, Request, Response, Tool},
+    agent::{Agent, AgentObserver},
+    chat_completions::Message,
     db::DbMessage,
-    tools::{Bash, EditFile, Glob, LoadSkill, ReadFile, ToolHandler, WriteFile},
 };
 use chrono::Utc;
-use reqwest::Client;
-use serde_json::Value;
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 
 const LLM_URL: &str = "https://api.deepseek.com/chat/completions";
@@ -138,155 +137,63 @@ async fn main() {
     .await
     .unwrap();
 
-    let request = Request {
-        model: conversation.get("model"),
-        messages: messages,
-        tools: Some(vec![
-            Tool {
-                tool_type: "function".to_string(),
-                function: Function {
-                    name: Bash.name().to_string(),
-                    description: Bash.description().to_string(),
-                    parameters: Bash.parameters(),
-                },
-            },
-            Tool {
-                tool_type: "function".to_string(),
-                function: Function {
-                    name: ReadFile.name().to_string(),
-                    description: ReadFile.description().to_string(),
-                    parameters: ReadFile.parameters(),
-                },
-            },
-            Tool {
-                tool_type: "function".to_string(),
-                function: Function {
-                    name: WriteFile.name().to_string(),
-                    description: WriteFile.description().to_string(),
-                    parameters: WriteFile.parameters(),
-                },
-            },
-            Tool {
-                tool_type: "function".to_string(),
-                function: Function {
-                    name: EditFile.name().to_string(),
-                    description: EditFile.description().to_string(),
-                    parameters: EditFile.parameters(),
-                },
-            },
-            Tool {
-                tool_type: "function".to_string(),
-                function: Function {
-                    name: Glob.name().to_string(),
-                    description: Glob.description().to_string(),
-                    parameters: Glob.parameters(),
-                },
-            },
-            Tool {
-                tool_type: "function".to_string(),
-                function: Function {
-                    name: LoadSkill.name().to_string(),
-                    description: LoadSkill.description().to_string(),
-                    parameters: LoadSkill.parameters(),
-                },
-            },
-        ]),
-    };
-
-    let client = Client::new();
-    agent_loop(client, api_key, request, conv_id, &mut conn).await;
+    let mut agent = Agent::new(LLM_URL.to_string(), api_key, conversation.get("model"))
+        .with_observer(ConversationObserver::new(conv_id, conn));
+    agent.send(messages).await;
 }
 
-async fn agent_loop(
-    client: Client,
-    api_key: String,
-    mut request: Request,
+struct ConversationObserver {
     conv_id: i64,
-    conn: &mut SqliteConnection,
-) {
-    loop {
-        println!(
-            "request: {}",
-            serde_json::to_string_pretty(&request).unwrap()
-        );
-        let response = client
-            .post(LLM_URL)
-            .bearer_auth(api_key.clone())
-            .json(&request)
-            .send()
-            .await
-            .expect("request failed");
-        if !response.status().is_success() {
-            eprintln!(
-                "HTTP {}: {}",
-                response.status(),
-                response.text().await.unwrap()
-            );
-            return;
-        }
-        let response: Response = response.json().await.unwrap();
-        println!(
-            "response: {}",
-            serde_json::to_string_pretty(&response).unwrap()
-        );
+    conn: SqliteConnection,
+}
 
-        if let Some(choice) = response.choices.first() {
-            request.messages.push(Message::Assistant {
-                content: choice.message.content.clone(),
-                name: None,
-                tool_calls: choice.message.tool_calls.clone(),
-            });
-            let tool_calls_json = choice
-                .message
-                .tool_calls
-                .as_ref()
-                .map(|tc| serde_json::to_string(&tc).unwrap());
-            sqlx::query(
+impl ConversationObserver {
+    pub fn new(conv_id: i64, conn: SqliteConnection) -> Self {
+        Self { conv_id, conn }
+    }
+}
+
+impl AgentObserver for ConversationObserver {
+    async fn message_update(&mut self, message: &Message) {
+        match message {
+            Message::Assistant {
+                content,
+                name,
+                tool_calls,
+            } => {
+                let tool_calls_json = tool_calls
+                    .as_ref()
+                    .map(|tc| serde_json::to_string(&tc).unwrap());
+                sqlx::query(
         "INSERT INTO messages (conversation_id, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?)",
                 )
-                .bind(conv_id)
+                .bind(self.conv_id)
                 .bind("assistant")
-                .bind(choice.message.content.clone())
+                .bind(content)
                 .bind(tool_calls_json)
                 .bind(Utc::now().timestamp())
-                .execute(&mut *conn)
+                .execute(&mut self.conn)
                 .await
                    .unwrap();
-
-            // If the model is done, we're done.
-            if choice.finish_reason != ToolCalls {
-                return;
             }
-
-            if let Some(tool_calls) = &choice.message.tool_calls {
-                for tool_call in tool_calls {
-                    let args: Value = serde_json::from_str(&tool_call.function.arguments).unwrap();
-                    let result = match tool_call.function.name.as_str() {
-                        "bash" => Bash.run(&args),
-                        "read_file" => ReadFile.run(&args),
-                        "write_file" => WriteFile.run(&args),
-                        "edit_file" => EditFile.run(&args),
-                        "glob" => Glob.run(&args),
-                        "load_skill" => LoadSkill.run(&args),
-                        other => format!("unknown tool: {other}"),
-                    };
-                    request.messages.push(Message::Tool {
-                        content: result.clone(),
-                        tool_call_id: tool_call.id.clone(),
-                    });
-                    sqlx::query(
+            Message::Tool {
+                content,
+                tool_call_id,
+            } => {
+                sqlx::query(
                     "INSERT INTO messages (conversation_id, role, content, tool_call_id, created_at) VALUES (?, ?, ?, ?, ?)",
                             )
-                            .bind(conv_id)
+                            .bind(self.conv_id)
                             .bind("tool")
-                            .bind(result.clone())
-                            .bind(tool_call.id.clone())
+                            .bind(content)
+                            .bind(tool_call_id)
                             .bind(Utc::now().timestamp())
-                            .execute(&mut *conn)
+                            .execute(&mut self.conn)
                             .await
                             .unwrap();
-                }
-            };
+            }
+            Message::System { content, name } => todo!(),
+            Message::User { content, name } => todo!(),
         }
     }
 }
