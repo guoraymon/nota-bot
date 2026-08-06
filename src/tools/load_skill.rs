@@ -25,7 +25,7 @@ impl ToolHandler for LoadSkill {
 
     fn run(&self, args: &serde_json::Value) -> String {
         let name = args.get("name").unwrap().as_str().unwrap();
-        load_skill(&dirs::home_dir().unwrap().join(".nota-agent"), name)
+        load_skill(&dirs::home_dir().unwrap().join(".nota-bot"), name)
     }
 }
 

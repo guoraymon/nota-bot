@@ -19,7 +19,7 @@ async fn main() {
     let user_msg = std::env::args().nth(1).expect("send a message");
     let api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY not set");
 
-    let nota_agent_home = dirs::home_dir().unwrap().join(".nota-agent");
+    let nota_agent_home = dirs::home_dir().unwrap().join(".nota-bot");
     let db_path = nota_agent_home.join("default.db");
     let db_opts = SqliteConnectOptions::new()
         .create_if_missing(true)
@@ -78,7 +78,7 @@ async fn main() {
             .bind("system")
             .bind(format!(
                     "You are a helpful assistant.\nSkills available:\n{}\nUse load_skill to get full details when needed.",
-                    skills::list_skills(&dirs::home_dir().unwrap().join(".nota-agent")),
+                    skills::list_skills(&dirs::home_dir().unwrap().join(".nota-bot")),
                 ))
                 .bind(Utc::now().timestamp())
                 .execute(&mut conn)
