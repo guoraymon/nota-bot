@@ -1,4 +1,5 @@
 mod agent;
+mod bot;
 mod chat_completions;
 mod db;
 mod skills;
@@ -6,20 +7,35 @@ mod tools;
 
 use crate::{
     agent::{Agent, AgentObserver},
+    bot::Bot,
     chat_completions::Message,
     db::DbMessage,
 };
 use chrono::Utc;
+use reqwest::Client;
+use serde_json::Value;
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 
 const LLM_URL: &str = "https://api.deepseek.com/chat/completions";
 
 #[tokio::main]
 async fn main() {
+    let nota_agent_home = dirs::home_dir().unwrap().join(".nota-bot");
+    let content = std::fs::read_to_string(nota_agent_home.join("config.json")).unwrap();
+    let cfg: Value = serde_json::from_str(&content).unwrap();
+    let app_id = cfg["app_id"].as_str().expect("app_id is null");
+    let client_secret = cfg["client_secret"]
+        .as_str()
+        .expect("client_secret is null");
+
+    let client = Client::new();
+    let mut bot = Bot::new();
+    bot.run(&client, app_id, client_secret).await;
+    return;
+
     let user_msg = std::env::args().nth(1).expect("send a message");
     let api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY not set");
 
-    let nota_agent_home = dirs::home_dir().unwrap().join(".nota-bot");
     let db_path = nota_agent_home.join("default.db");
     let db_opts = SqliteConnectOptions::new()
         .create_if_missing(true)
