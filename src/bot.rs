@@ -67,10 +67,11 @@ impl Bot {
     }
 
     pub async fn run(&mut self, client: &Client, app_id: &str, client_secret: &str) {
-        let access_token = TokenManager::new(app_id.to_string(), client_secret.to_string())
-            .get_token(client)
-            .await;
-        let gateway_url = get_gateway_url(client, &access_token).await;
+        let mut tokens = TokenManager::new(app_id.to_string(), client_secret.to_string());
+        let access_token = tokens.get_token(client).await;
+        let mut api = BotApi::new(client.clone(), tokens);
+
+        let gateway_url = api.get_gateway_url().await;
         let (stream, _response) = tokio_tungstenite::connect_async(gateway_url).await.unwrap();
         let (mut write, mut read) = stream.split();
 
@@ -126,7 +127,7 @@ impl Bot {
                                                 let user_openid = payload.d["author"]["user_openid"].as_str().unwrap();
                                                 let msg_id = payload.d["id"].as_str().unwrap();
                                                 let content = payload.d["content"].as_str().unwrap();
-                                                send_user_msg(client, &access_token, user_openid, msg_id, content).await;
+                                                api.send_user_msg(user_openid, msg_id, content).await;
                                             }
                                             _ => {}
                                         }
@@ -151,6 +152,60 @@ impl Bot {
                 }
             }
         }
+    }
+}
+
+struct BotApi {
+    client: Client,
+    tokens: TokenManager,
+}
+
+impl BotApi {
+    pub fn new(client: Client, tokens: TokenManager) -> Self {
+        BotApi { client, tokens }
+    }
+
+    async fn auth_header(&mut self) -> String {
+        let access_token = self.tokens.get_token(&self.client).await;
+        format!("QQBot {access_token}")
+    }
+
+    pub async fn get_gateway_url(&mut self) -> String {
+        #[derive(Deserialize)]
+        struct Rep {
+            url: String,
+        }
+
+        let rep: Rep = self
+            .client
+            .get(format!("{API_BASE}/gateway"))
+            .header("Authorization", self.auth_header().await)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        return rep.url;
+    }
+
+    async fn send_user_msg(&mut self, user_openid: &str, msg_id: &str, content: &str) {
+        let json = serde_json::json!({
+            "content": content,
+            "msg_type": 0,
+            "msg_id": msg_id,
+        });
+        println!("send_user_msg: {json}");
+        let res = self
+            .client
+            .post(format!("{API_BASE}/v2/users/{user_openid}/messages"))
+            .header("Authorization", self.auth_header().await)
+            .json(&json)
+            .send()
+            .await
+            .unwrap();
+        let rep: Value = res.json().await.unwrap();
+        println!("send_user_msg rep: {rep}")
     }
 }
 
@@ -226,46 +281,4 @@ pub async fn get_access_token(
         .unwrap();
     let rep: Rep = res.json().await.unwrap();
     return (rep.access_token, rep.expires_in);
-}
-
-pub async fn get_gateway_url(client: &Client, access_token: &str) -> String {
-    #[derive(Deserialize)]
-    struct Rep {
-        url: String,
-    }
-
-    let rep: Rep = client
-        .get(format!("{API_BASE}/gateway"))
-        .header("Authorization", format!("QQBot {access_token}"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    return rep.url;
-}
-
-async fn send_user_msg(
-    client: &Client,
-    access_token: &str,
-    user_openid: &str,
-    msg_id: &str,
-    content: &str,
-) {
-    let json = serde_json::json!({
-        "content": content,
-        "msg_type": 0,
-        "msg_id": msg_id,
-    });
-    println!("send_user_msg: {json}");
-    let res = client
-        .post(format!("{API_BASE}/v2/users/{user_openid}/messages"))
-        .header("Authorization", format!("QQBot {access_token}"))
-        .json(&json)
-        .send()
-        .await
-        .unwrap();
-    let rep: Value = res.json().await.unwrap();
-    println!("send_user_msg rep: {rep}")
 }
