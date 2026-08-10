@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
 const API_BASE: &str = "https://api.bot.qq.com";
@@ -13,9 +13,9 @@ const API_BASE: &str = "https://api.bot.qq.com";
 const OP_DISPATCH: u8 = 0;
 const OP_HEARTBEAT: u8 = 1;
 const OP_IDENTIFY: u8 = 2;
-// const OP_RESUME: u8 = 6;
-// const OP_RECONNECT: u8 = 7;
-// const OP_INVALID_SESSION: u8 = 9;
+const OP_RESUME: u8 = 6;
+const OP_RECONNECT: u8 = 7;
+const OP_INVALID_SESSION: u8 = 9;
 const OP_HELLO: u8 = 10;
 const OP_HEARTBEAT_ACK: u8 = 11;
 
@@ -58,97 +58,145 @@ struct ClientProperties {
 }
 
 pub struct Bot {
+    session_id: Option<String>,
     last_seq: Option<u32>,
 }
 
 impl Bot {
     pub fn new() -> Self {
-        Self { last_seq: None }
+        Self {
+            session_id: None,
+            last_seq: None,
+        }
     }
 
     pub async fn run(&mut self, client: &Client, app_id: &str, client_secret: &str) {
-        let mut tokens = TokenManager::new(app_id, client_secret);
-        let access_token = tokens.get_token(client).await;
-        let mut api = BotApi::new(client.clone(), tokens);
+        let tokens = TokenManager::new(client, app_id, client_secret);
+        let mut api = BotApi::new(client, tokens);
 
         let gateway_url = api.get_gateway_url().await;
-        let (stream, _response) = tokio_tungstenite::connect_async(gateway_url).await.unwrap();
-        let (mut write, mut read) = stream.split();
-
-        // 首条消息必定是 Hello
-        let interval: Option<u64> = match read.next().await {
-            Some(Ok(Message::Text(s))) => {
-                let payload = serde_json::from_str::<WsEvent>(&s).ok().unwrap();
-                if payload.op == OP_HELLO {
-                    let data = serde_json::from_value::<HelloData>(payload.d).ok().unwrap();
-                    Some(data.heartbeat_interval)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        // 登录鉴权
-        let identify_cmd = WsCommand {
-            op: OP_IDENTIFY,
-            d: serde_json::json!(&IdentifyData {
-                token: format!("QQBot {access_token}"),
-                intents: 0 | (1 << 25),
-                shard: (0, 1),
-                properties: ClientProperties {
-                    os: "".into(),
-                    browser: "".into(),
-                    device: "".into(),
-                },
-            }),
-        };
-        let identify_cmd_string = serde_json::to_string(&identify_cmd).unwrap();
-        println!("[bot.run]write identify: {identify_cmd_string}");
-        write.send(identify_cmd_string.into()).await.unwrap();
-
-        // 心跳
-        let mut hb_interval = tokio::time::interval(Duration::from_millis(interval.unwrap()));
-
         loop {
-            tokio::select! {
-                msg = read.next() => {
-                     match msg {
-                        Some(Ok(Message::Text(s))) => {
-                            if let Ok(payload) = serde_json::from_str::<WsEvent>(&s) {
-                                match payload.op {
-                                    OP_DISPATCH => {
-                                        self.last_seq = payload.s;
-                                        match payload.t.unwrap().as_str() {
-                                            "READY" => {
-                                                println!("[bot.run]dispatch READY: {}", payload.d);
-                                            }
-                                            "C2C_MESSAGE_CREATE" => {
-                                                println!("[bot.run]dispatch C2C_MESSAGE_CREATE: {}", payload.d);
-                                                let user_openid = payload.d["author"]["user_openid"].as_str().unwrap();
-                                                let msg_id = payload.d["id"].as_str().unwrap();
-                                                let content = payload.d["content"].as_str().unwrap();
-                                                api.send_user_msg(user_openid, msg_id, content).await;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    OP_HEARTBEAT_ACK => {
-                                        println!("[bot.run]read heartbeat ack")
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        _ => {
-                            println!("{:?}", msg);
-                        }
+            let (stream, _response) = tokio_tungstenite::connect_async(gateway_url.clone())
+                .await
+                .unwrap();
+            let (mut write, mut read) = stream.split();
+
+            // 首条消息必定是 Hello
+            let interval: Option<u64> = match read.next().await {
+                Some(Ok(Message::Text(s))) => {
+                    let payload = serde_json::from_str::<WsEvent>(&s).ok().unwrap();
+                    if payload.op == OP_HELLO {
+                        let data = serde_json::from_value::<HelloData>(payload.d).ok().unwrap();
+                        Some(data.heartbeat_interval)
+                    } else {
+                        None
                     }
                 }
-                _ = hb_interval.tick() => {
-                    let cmd = WsCommand{op: OP_HEARTBEAT, d: serde_json::json!(&self.last_seq) };
-                    let cmd_string = serde_json::to_string(&cmd).unwrap();
-                    println!("[bot.run]write heartbeat: {cmd_string}");
-                    write.send(cmd_string.into()).await.unwrap();
+                _ => None,
+            };
+
+            if self.session_id.is_none() {
+                // 登录鉴权
+                let identify_cmd = WsCommand {
+                    op: OP_IDENTIFY,
+                    d: serde_json::json!(&IdentifyData {
+                        token: api.auth_header().await,
+                        intents: 0 | (1 << 25),
+                        shard: (0, 1),
+                        properties: ClientProperties {
+                            os: "".into(),
+                            browser: "".into(),
+                            device: "".into(),
+                        },
+                    }),
+                };
+                let identify_cmd_string = serde_json::to_string(&identify_cmd).unwrap();
+                println!("[bot.run]write identify: {identify_cmd_string}");
+                write.send(identify_cmd_string.into()).await.unwrap();
+            } else {
+                let cmd = WsCommand {
+                    op: OP_RESUME,
+                    d: json!({
+                        "token": api.auth_header().await,
+                        "session_id": &self.session_id,
+                        "seq": &self.last_seq,
+                    }),
+                };
+                let cmd_string = serde_json::to_string(&cmd).unwrap();
+                println!("[bot.run]write resume: {cmd_string}");
+                write.send(cmd_string.into()).await.unwrap();
+            }
+
+            // 心跳
+            let mut hb_interval = tokio::time::interval(Duration::from_millis(interval.unwrap()));
+
+            loop {
+                tokio::select! {
+                    msg = read.next() => {
+                         match msg {
+                            Some(Ok(Message::Text(s))) => {
+                                if let Ok(payload) = serde_json::from_str::<WsEvent>(&s) {
+                                    match payload.op {
+                                        OP_DISPATCH => {
+                                            self.last_seq = payload.s;
+                                            match payload.t.unwrap().as_str() {
+                                                "READY" => {
+                                                    println!("[bot.run]dispatch READY: {}", payload.d);
+                                                    let session_id = payload.d["session_id"].as_str().unwrap();
+                                                    self.session_id = Some(session_id.to_string());
+                                                }
+                                                "RESUMED" => {
+                                                    println!("[bot.run]dispatch RESUMED");
+                                                }
+                                                "C2C_MESSAGE_CREATE" => {
+                                                    println!("[bot.run]dispatch C2C_MESSAGE_CREATE: {}", payload.d);
+                                                    let user_openid = payload.d["author"]["user_openid"].as_str().unwrap();
+                                                    let msg_id = payload.d["id"].as_str().unwrap();
+                                                    let content = payload.d["content"].as_str().unwrap();
+                                                    api.send_user_msg(user_openid, msg_id, content).await;
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        OP_RECONNECT => {
+                                            break;
+                                        }
+                                        OP_INVALID_SESSION => {
+                                            if payload.d == false {
+                                                self.session_id = None;
+                                            }
+                                            break;
+                                        }
+                                        OP_HEARTBEAT_ACK => {
+                                            println!("[bot.run]read heartbeat ack")
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            Some(Err(_)) => {
+                                println!("[bot.run]read error");
+                                break;
+                            }
+                            Some(Ok(Message::Close(_))) => {
+                                println!("[bot.run]read close");
+                                break;
+                            }
+                            None => {
+                                println!("[bot.run]read none");
+                                break;
+                            }
+                            _ => {
+                                println!("[bot.run]read other: {:?}", msg);
+                            }
+                        }
+                    }
+                    _ = hb_interval.tick() => {
+                        let cmd = WsCommand{op: OP_HEARTBEAT, d: serde_json::json!(&self.last_seq) };
+                        let cmd_string = serde_json::to_string(&cmd).unwrap();
+                        println!("[bot.run]write heartbeat: {cmd_string}");
+                        write.send(cmd_string.into()).await.unwrap();
+                    }
                 }
             }
         }
@@ -161,12 +209,15 @@ struct BotApi {
 }
 
 impl BotApi {
-    pub fn new(client: Client, tokens: TokenManager) -> Self {
-        BotApi { client, tokens }
+    pub fn new(client: &Client, tokens: TokenManager) -> Self {
+        BotApi {
+            client: client.to_owned(),
+            tokens: tokens,
+        }
     }
 
     async fn auth_header(&mut self) -> String {
-        let access_token = self.tokens.get_token(&self.client).await;
+        let access_token = self.tokens.get_token().await;
         format!("QQBot {access_token}")
     }
 
@@ -213,6 +264,7 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 
 struct TokenManager {
     state: Option<TokenState>,
+    client: Client,
     app_id: String,
     client_secret: String,
 }
@@ -223,9 +275,10 @@ struct TokenState {
 }
 
 impl TokenManager {
-    pub fn new(app_id: &str, client_secret: &str) -> Self {
+    pub fn new(client: &Client, app_id: &str, client_secret: &str) -> Self {
         Self {
             state: None,
+            client: client.clone(),
             app_id: app_id.to_owned(),
             client_secret: client_secret.to_owned(),
         }
@@ -238,10 +291,10 @@ impl TokenManager {
         }
     }
 
-    pub async fn get_token(&mut self, client: &Client) -> String {
+    pub async fn get_token(&mut self) -> String {
         if self.is_expired() {
             let (access_token, expires_in) =
-                get_access_token(client, &self.app_id, &self.client_secret).await;
+                get_access_token(&self.client, &self.app_id, &self.client_secret).await;
             self.state = Some(TokenState {
                 token: access_token,
                 expires_at: Instant::now() + Duration::from_secs(expires_in),
