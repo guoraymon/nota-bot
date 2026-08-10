@@ -74,26 +74,44 @@ impl Bot {
         let tokens = TokenManager::new(client, app_id, client_secret);
         let mut api = BotApi::new(client, tokens);
 
+        let mut attempt = 0;
         let gateway_url = api.get_gateway_url().await;
         loop {
-            let (stream, _response) = tokio_tungstenite::connect_async(gateway_url.clone())
-                .await
-                .unwrap();
+            if attempt > 0 {
+                let sec = (2u64).saturating_pow(attempt).min(30);
+                let delay = Duration::from_secs(sec);
+                println!("[bot.run]sleep {}s", sec);
+                tokio::time::sleep(delay).await;
+            }
+
+            let (stream, _) = match tokio_tungstenite::connect_async(gateway_url.clone()).await {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("Failed to connect to gateway: {}", e);
+                    attempt += 1;
+                    continue;
+                }
+            };
             let (mut write, mut read) = stream.split();
 
             // 首条消息必定是 Hello
-            let interval: Option<u64> = match read.next().await {
-                Some(Ok(Message::Text(s))) => {
-                    let payload = serde_json::from_str::<WsEvent>(&s).ok().unwrap();
-                    if payload.op == OP_HELLO {
-                        let data = serde_json::from_value::<HelloData>(payload.d).ok().unwrap();
-                        Some(data.heartbeat_interval)
-                    } else {
-                        None
-                    }
+            let interval = async {
+                let msg = read.next().await?.ok()?;
+                let Message::Text(text) = msg else {
+                    return None;
+                };
+                let payload = serde_json::from_str::<WsEvent>(&text).ok()?;
+                if payload.op != OP_HELLO {
+                    return None;
                 }
-                _ => None,
-            };
+                let data = serde_json::from_value::<HelloData>(payload.d).ok()?;
+                Some(data.heartbeat_interval)
+            }
+            .await;
+            if interval.is_none() {
+                attempt += 1;
+                continue;
+            }
 
             if self.session_id.is_none() {
                 // 登录鉴权
@@ -144,9 +162,11 @@ impl Bot {
                                                     println!("[bot.run]dispatch READY: {}", payload.d);
                                                     let session_id = payload.d["session_id"].as_str().unwrap();
                                                     self.session_id = Some(session_id.to_string());
+                                                    attempt = 0;
                                                 }
                                                 "RESUMED" => {
                                                     println!("[bot.run]dispatch RESUMED");
+                                                    attempt = 0;
                                                 }
                                                 "C2C_MESSAGE_CREATE" => {
                                                     println!("[bot.run]dispatch C2C_MESSAGE_CREATE: {}", payload.d);
@@ -159,12 +179,14 @@ impl Bot {
                                             }
                                         }
                                         OP_RECONNECT => {
+                                            attempt += 1;
                                             break;
                                         }
                                         OP_INVALID_SESSION => {
                                             if payload.d == false {
                                                 self.session_id = None;
                                             }
+                                            attempt += 1;
                                             break;
                                         }
                                         OP_HEARTBEAT_ACK => {
@@ -176,14 +198,17 @@ impl Bot {
                             }
                             Some(Err(_)) => {
                                 println!("[bot.run]read error");
+                                attempt += 1;
                                 break;
                             }
                             Some(Ok(Message::Close(_))) => {
                                 println!("[bot.run]read close");
+                                attempt += 1;
                                 break;
                             }
                             None => {
                                 println!("[bot.run]read none");
+                                attempt += 1;
                                 break;
                             }
                             _ => {
