@@ -67,7 +67,7 @@ impl Bot {
     }
 
     pub async fn run(&mut self, client: &Client, app_id: &str, client_secret: &str) {
-        let mut tokens = TokenManager::new(app_id.to_string(), client_secret.to_string());
+        let mut tokens = TokenManager::new(app_id, client_secret);
         let access_token = tokens.get_token(client).await;
         let mut api = BotApi::new(client.clone(), tokens);
 
@@ -219,22 +219,22 @@ struct TokenManager {
 
 struct TokenState {
     token: String,
-    expores_at: Instant,
+    expires_at: Instant,
 }
 
 impl TokenManager {
-    pub fn new(app_id: String, client_secret: String) -> Self {
+    pub fn new(app_id: &str, client_secret: &str) -> Self {
         Self {
             state: None,
-            app_id: app_id,
-            client_secret: client_secret,
+            app_id: app_id.to_owned(),
+            client_secret: client_secret.to_owned(),
         }
     }
 
     pub fn is_expired(&self) -> bool {
         match &self.state {
             None => true,
-            Some(state) => Instant::now() >= state.expores_at - REFRESH_MARGIN,
+            Some(state) => Instant::now() >= state.expires_at - REFRESH_MARGIN,
         }
     }
 
@@ -244,19 +244,14 @@ impl TokenManager {
                 get_access_token(client, &self.app_id, &self.client_secret).await;
             self.state = Some(TokenState {
                 token: access_token,
-                expores_at: Instant::now()
-                    + Duration::from_secs(expires_in.parse::<u64>().unwrap()),
+                expires_at: Instant::now() + Duration::from_secs(expires_in),
             });
         }
         return self.state.as_ref().unwrap().token.clone();
     }
 }
 
-pub async fn get_access_token(
-    client: &Client,
-    app_id: &str,
-    client_secret: &str,
-) -> (String, String) {
+pub async fn get_access_token(client: &Client, app_id: &str, client_secret: &str) -> (String, u64) {
     #[derive(Serialize)]
     #[allow(non_snake_case)]
     struct Req<'a> {
@@ -280,5 +275,5 @@ pub async fn get_access_token(
         .await
         .unwrap();
     let rep: Rep = res.json().await.unwrap();
-    return (rep.access_token, rep.expires_in);
+    return (rep.access_token, rep.expires_in.parse::<u64>().unwrap());
 }
