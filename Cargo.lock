@@ -1098,6 +1098,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "glob",
+ "rand",
  "reqwest",
  "serde",
  "serde_json",

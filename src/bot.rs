@@ -3,6 +3,7 @@
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use rand::RngExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -78,9 +79,9 @@ impl Bot {
         let gateway_url = api.get_gateway_url().await;
         loop {
             if attempt > 0 {
-                let sec = (2u64).saturating_pow(attempt).min(30);
-                let delay = Duration::from_secs(sec);
-                println!("[bot.run]sleep {}s", sec);
+                let half: u64 = (2u64).saturating_pow(attempt).min(30) * 1000 / 2;
+                let delay = Duration::from_millis(half + rand::rng().random_range(0..=half));
+                println!("[bot.run]sleep {:?}", delay);
                 tokio::time::sleep(delay).await;
             }
 
