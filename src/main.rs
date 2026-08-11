@@ -7,7 +7,7 @@ mod tools;
 
 use crate::{
     agent::{Agent, AgentObserver},
-    bot::{Bot, MessageHandler},
+    bot::{Bot, BotApi, TokenManager},
     chat_completions::Message,
     db::DbMessage,
 };
@@ -15,6 +15,7 @@ use chrono::Utc;
 use reqwest::Client;
 use serde_json::Value;
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
+use tokio::sync::mpsc;
 
 const LLM_URL: &str = "https://api.deepseek.com/chat/completions";
 
@@ -99,18 +100,84 @@ async fn main() {
         .as_str()
         .expect("client_secret is null");
 
+    let mut conversation_store = ConversationStore { conn, conv_id };
     let client = Client::new();
-    let mut bot = Bot::new();
+    let tokens = TokenManager::new(&client, app_id, client_secret);
+    let mut bot = Bot::new(&client, app_id, client_secret);
+    let mut bot_api = BotApi::new(&client, tokens);
 
-    let conversation_store = ConversationStore { conn, conv_id };
     let api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY not set");
-    let agent: Agent<ConversationObserver> =
+    let mut agent: Agent<ConversationObserver> =
         Agent::new(LLM_URL.to_string(), api_key, conversation.get("model"));
 
-    let mut bot_handler = BotHandler::new(agent, conversation_store);
-    bot.run(&client, app_id, client_secret, &mut bot_handler)
-        .await;
+    let (tx, mut rx) = mpsc::channel::<IncomingMessage>(100);
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            conversation_store
+                .append("user", Some(msg.content.to_string()), None, None)
+                .await;
+            let messages = agent.send(conversation_store.get().await).await;
+            for message in &messages {
+                match message {
+                    Message::System {
+                        content: _,
+                        name: _,
+                    } => {}
+                    Message::User {
+                        content: _,
+                        name: _,
+                    } => {}
+                    Message::Assistant {
+                        content,
+                        name: _,
+                        tool_calls,
+                    } => {
+                        let tool_calls_json = tool_calls
+                            .as_ref()
+                            .map(|tc| serde_json::to_string(&tc).unwrap());
+
+                        conversation_store
+                            .append("assistant", content.clone(), tool_calls_json, None)
+                            .await;
+                    }
+                    Message::Tool {
+                        content,
+                        tool_call_id,
+                    } => {
+                        conversation_store
+                            .append(
+                                "tool",
+                                Some(content.clone()),
+                                None,
+                                Some(tool_call_id.clone()),
+                            )
+                            .await;
+                    }
+                }
+            }
+
+            if let Some(Message::Assistant {
+                content: Some(c),
+                name: _,
+                tool_calls: _,
+            }) = messages.last()
+            {
+                bot_api
+                    .send_user_msg(&msg.user_openid, &msg.msg_id, c)
+                    .await;
+            }
+        }
+    });
+
+    bot.run(tx).await;
+
     return;
+}
+
+pub struct IncomingMessage {
+    user_openid: String,
+    msg_id: String,
+    content: String,
 }
 
 struct ConversationStore {
@@ -164,7 +231,7 @@ impl ConversationStore {
         tool_call_id: Option<String>,
     ) {
         sqlx::query(
-            "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(self.conv_id)
         .bind(role)
@@ -225,76 +292,6 @@ impl AgentObserver for ConversationObserver {
                     )
                     .await;
             }
-        }
-    }
-}
-
-pub struct BotHandler {
-    agent: Agent<ConversationObserver>,
-    conversation_store: ConversationStore,
-}
-
-impl BotHandler {
-    fn new(agent: Agent<ConversationObserver>, conversation_store: ConversationStore) -> Self {
-        Self {
-            agent,
-            conversation_store,
-        }
-    }
-}
-
-impl MessageHandler for BotHandler {
-    async fn reply(&mut self, content: &str) -> String {
-        self.conversation_store
-            .append("user", Some(content.to_string()), None, None)
-            .await;
-        let messages = self.agent.send(self.conversation_store.get().await).await;
-        for message in &messages {
-            match message {
-                Message::System {
-                    content: _,
-                    name: _,
-                } => {}
-                Message::User {
-                    content: _,
-                    name: _,
-                } => {}
-                Message::Assistant {
-                    content,
-                    name: _,
-                    tool_calls,
-                } => {
-                    let tool_calls_json = tool_calls
-                        .as_ref()
-                        .map(|tc| serde_json::to_string(&tc).unwrap());
-
-                    self.conversation_store
-                        .append("assistant", content.clone(), tool_calls_json, None)
-                        .await;
-                }
-                Message::Tool {
-                    content,
-                    tool_call_id,
-                } => {
-                    self.conversation_store
-                        .append(
-                            "tool",
-                            Some(content.clone()),
-                            None,
-                            Some(tool_call_id.clone()),
-                        )
-                        .await;
-                }
-            }
-        }
-
-        match messages.last() {
-            Some(Message::Assistant {
-                content,
-                name: _,
-                tool_calls: _,
-            }) => return content.clone().unwrap_or_default(),
-            _ => String::new(),
         }
     }
 }

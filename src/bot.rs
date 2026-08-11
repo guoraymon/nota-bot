@@ -7,7 +7,10 @@ use rand::RngExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::mpsc::Sender;
 use tokio_tungstenite::tungstenite::Message;
+
+use crate::IncomingMessage;
 
 const API_BASE: &str = "https://api.bot.qq.com";
 
@@ -59,30 +62,25 @@ struct ClientProperties {
 }
 
 pub struct Bot {
+    api: BotApi,
     session_id: Option<String>,
     last_seq: Option<u32>,
 }
 
 impl Bot {
-    pub fn new() -> Self {
+    pub fn new(client: &Client, app_id: &str, client_secret: &str) -> Self {
+        let tokens = TokenManager::new(client, app_id, client_secret);
+        let api = BotApi::new(client, tokens);
         Self {
+            api,
             session_id: None,
             last_seq: None,
         }
     }
 
-    pub async fn run<H: MessageHandler>(
-        &mut self,
-        client: &Client,
-        app_id: &str,
-        client_secret: &str,
-        handler: &mut H,
-    ) {
-        let tokens = TokenManager::new(client, app_id, client_secret);
-        let mut api = BotApi::new(client, tokens);
-
+    pub async fn run(&mut self, tx: Sender<IncomingMessage>) {
         let mut attempt = 0;
-        let gateway_url = api.get_gateway_url().await;
+        let gateway_url = self.api.get_gateway_url().await;
         loop {
             if attempt > 0 {
                 let half: u64 = (2u64).saturating_pow(attempt).min(30) * 1000 / 2;
@@ -125,7 +123,7 @@ impl Bot {
                 let identify_cmd = WsCommand {
                     op: OP_IDENTIFY,
                     d: serde_json::json!(&IdentifyData {
-                        token: api.auth_header().await,
+                        token: self.api.auth_header().await,
                         intents: 0 | (1 << 25),
                         shard: (0, 1),
                         properties: ClientProperties {
@@ -142,7 +140,7 @@ impl Bot {
                 let cmd = WsCommand {
                     op: OP_RESUME,
                     d: json!({
-                        "token": api.auth_header().await,
+                        "token": self.api.auth_header().await,
                         "session_id": &self.session_id,
                         "seq": &self.last_seq,
                     }),
@@ -180,8 +178,11 @@ impl Bot {
                                                     let user_openid = payload.d["author"]["user_openid"].as_str().unwrap();
                                                     let msg_id = payload.d["id"].as_str().unwrap();
                                                     let content = payload.d["content"].as_str().unwrap();
-                                                    let reply = handler.reply(content).await;
-                                                    api.send_user_msg(user_openid, msg_id, &reply).await;
+                                                    let _ = tx.send(IncomingMessage {
+                                                        content:content.to_owned(),
+                                                        user_openid: user_openid.to_owned(),
+                                                        msg_id: msg_id.to_owned()
+                                                    }).await;
                                                 }
                                                 _ => {}
                                             }
@@ -236,7 +237,7 @@ impl Bot {
     }
 }
 
-struct BotApi {
+pub struct BotApi {
     client: Client,
     tokens: TokenManager,
 }
@@ -273,7 +274,7 @@ impl BotApi {
         return rep.url;
     }
 
-    async fn send_user_msg(&mut self, user_openid: &str, msg_id: &str, content: &str) {
+    pub async fn send_user_msg(&mut self, user_openid: &str, msg_id: &str, content: &str) {
         let json = serde_json::json!({
             "content": content,
             "msg_type": 0,
@@ -295,7 +296,7 @@ impl BotApi {
 
 const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 
-struct TokenManager {
+pub struct TokenManager {
     state: Option<TokenState>,
     client: Client,
     app_id: String,
@@ -337,7 +338,7 @@ impl TokenManager {
     }
 }
 
-pub async fn get_access_token(client: &Client, app_id: &str, client_secret: &str) -> (String, u64) {
+async fn get_access_token(client: &Client, app_id: &str, client_secret: &str) -> (String, u64) {
     #[derive(Serialize)]
     #[allow(non_snake_case)]
     struct Req<'a> {
@@ -362,8 +363,4 @@ pub async fn get_access_token(client: &Client, app_id: &str, client_secret: &str
         .unwrap();
     let rep: Rep = res.json().await.unwrap();
     return (rep.access_token, rep.expires_in.parse::<u64>().unwrap());
-}
-
-pub trait MessageHandler {
-    async fn reply(&mut self, content: &str) -> String;
 }
