@@ -24,6 +24,9 @@ const OP_INVALID_SESSION: u8 = 9;
 const OP_HELLO: u8 = 10;
 const OP_HEARTBEAT_ACK: u8 = 11;
 
+/// C2C 单聊消息
+const INTENT_C2C_MESSAGE: u64 = 1 << 25;
+
 #[derive(Deserialize)]
 struct WsEvent {
     _id: Option<String>,
@@ -75,8 +78,8 @@ pub struct Bot {
 }
 
 impl Bot {
-    pub fn new(client: &Client, tokens: Arc<TokenManager>) -> Self {
-        let api = BotApi::new(client, tokens);
+    pub fn new(client: &Client, token_manager: Arc<TokenManager>) -> Self {
+        let api = BotApi::new(client, token_manager);
         Self {
             api,
             session_id: None,
@@ -130,7 +133,7 @@ impl Bot {
                     op: OP_IDENTIFY,
                     d: serde_json::json!(&IdentifyData {
                         token: self.api.auth_header().await,
-                        intents: 0 | (1 << 25),
+                        intents: INTENT_C2C_MESSAGE,
                         shard: (0, 1),
                         properties: ClientProperties {
                             os: "".into(),
@@ -244,19 +247,19 @@ impl Bot {
 
 pub struct BotApi {
     client: Client,
-    tokens: Arc<TokenManager>,
+    token_manager: Arc<TokenManager>,
 }
 
 impl BotApi {
-    pub fn new(client: &Client, tokens: Arc<TokenManager>) -> Self {
+    pub fn new(client: &Client, token_manager: Arc<TokenManager>) -> Self {
         BotApi {
             client: client.to_owned(),
-            tokens: tokens,
+            token_manager: token_manager,
         }
     }
 
     async fn auth_header(&self) -> String {
-        let access_token = self.tokens.get_token().await;
+        let access_token = self.token_manager.get_token().await;
         format!("QQBot {access_token}")
     }
 
