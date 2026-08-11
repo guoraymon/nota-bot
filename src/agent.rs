@@ -36,7 +36,7 @@ impl<O: AgentObserver> Agent<O> {
         self
     }
 
-    pub async fn send(&mut self, messages: Vec<Message>) {
+    pub async fn send(&mut self, messages: Vec<Message>) -> Vec<Message> {
         let mut request = Request {
             model: self.model.clone(),
             messages: messages,
@@ -92,10 +92,11 @@ impl<O: AgentObserver> Agent<O> {
             ]),
         };
 
-        self.agent_loop(&mut request).await;
+        self.agent_loop(&mut request).await
     }
 
-    async fn agent_loop(&mut self, request: &mut Request) {
+    async fn agent_loop(&mut self, request: &mut Request) -> Vec<Message> {
+        let mut result = vec![];
         loop {
             println!(
                 "request: {}",
@@ -115,7 +116,7 @@ impl<O: AgentObserver> Agent<O> {
                     response.status(),
                     response.text().await.unwrap()
                 );
-                return;
+                return result;
             }
             let response: Response = response.json().await.unwrap();
             println!(
@@ -132,18 +133,19 @@ impl<O: AgentObserver> Agent<O> {
                 if let Some(obs) = self.observer.as_mut() {
                     obs.message_update(&message).await;
                 }
+                result.push(message.clone());
                 request.messages.push(message);
 
                 // If the model is done, we're done.
                 if choice.finish_reason != ToolCalls {
-                    return;
+                    return result;
                 }
 
                 if let Some(tool_calls) = &choice.message.tool_calls {
                     for tool_call in tool_calls {
                         let args: Value =
                             serde_json::from_str(&tool_call.function.arguments).unwrap();
-                        let result = match tool_call.function.name.as_str() {
+                        let res = match tool_call.function.name.as_str() {
                             "bash" => Bash.run(&args),
                             "read_file" => ReadFile.run(&args),
                             "write_file" => WriteFile.run(&args),
@@ -153,12 +155,13 @@ impl<O: AgentObserver> Agent<O> {
                             other => format!("unknown tool: {other}"),
                         };
                         let message = Message::Tool {
-                            content: result.clone(),
+                            content: res.clone(),
                             tool_call_id: tool_call.id.clone(),
                         };
                         if let Some(obs) = self.observer.as_mut() {
                             obs.message_update(&message).await;
                         }
+                        result.push(message.clone());
                         request.messages.push(message);
                     }
                 };

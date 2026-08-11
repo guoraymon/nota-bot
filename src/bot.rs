@@ -71,7 +71,13 @@ impl Bot {
         }
     }
 
-    pub async fn run(&mut self, client: &Client, app_id: &str, client_secret: &str) {
+    pub async fn run<H: MessageHandler>(
+        &mut self,
+        client: &Client,
+        app_id: &str,
+        client_secret: &str,
+        handler: &mut H,
+    ) {
         let tokens = TokenManager::new(client, app_id, client_secret);
         let mut api = BotApi::new(client, tokens);
 
@@ -174,7 +180,8 @@ impl Bot {
                                                     let user_openid = payload.d["author"]["user_openid"].as_str().unwrap();
                                                     let msg_id = payload.d["id"].as_str().unwrap();
                                                     let content = payload.d["content"].as_str().unwrap();
-                                                    api.send_user_msg(user_openid, msg_id, content).await;
+                                                    let reply = handler.reply(content).await;
+                                                    api.send_user_msg(user_openid, msg_id, &reply).await;
                                                 }
                                                 _ => {}
                                             }
@@ -355,4 +362,8 @@ pub async fn get_access_token(client: &Client, app_id: &str, client_secret: &str
         .unwrap();
     let rep: Rep = res.json().await.unwrap();
     return (rep.access_token, rep.expires_in.parse::<u64>().unwrap());
+}
+
+pub trait MessageHandler {
+    async fn reply(&mut self, content: &str) -> String;
 }

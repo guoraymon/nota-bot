@@ -24,7 +24,7 @@ pub struct Request {
     // user_id
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
     System {

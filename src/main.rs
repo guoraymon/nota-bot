@@ -7,7 +7,7 @@ mod tools;
 
 use crate::{
     agent::{Agent, AgentObserver},
-    bot::Bot,
+    bot::{Bot, MessageHandler},
     chat_completions::Message,
     db::DbMessage,
 };
@@ -21,20 +21,6 @@ const LLM_URL: &str = "https://api.deepseek.com/chat/completions";
 #[tokio::main]
 async fn main() {
     let nota_agent_home = dirs::home_dir().unwrap().join(".nota-bot");
-    let content = std::fs::read_to_string(nota_agent_home.join("config.json")).unwrap();
-    let cfg: Value = serde_json::from_str(&content).unwrap();
-    let app_id = cfg["app_id"].as_str().expect("app_id is null");
-    let client_secret = cfg["client_secret"]
-        .as_str()
-        .expect("client_secret is null");
-
-    let client = Client::new();
-    let mut bot = Bot::new();
-    bot.run(&client, app_id, client_secret).await;
-    return;
-
-    let user_msg = std::env::args().nth(1).expect("send a message");
-    let api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY not set");
 
     let db_path = nota_agent_home.join("default.db");
     let db_opts = SqliteConnectOptions::new()
@@ -105,111 +91,210 @@ async fn main() {
     };
 
     let conv_id: i64 = conversation.get("id");
-    let db_messages =
-        sqlx::query_as::<_, DbMessage>("SELECT * FROM messages WHERE conversation_id = ?")
-            .bind(conv_id)
-            .fetch_all(&mut conn)
-            .await
-            .unwrap();
-    let mut messages = db_messages
-        .into_iter()
-        .map(|db_message| match db_message.role.as_str() {
-            "system" => Message::System {
-                content: db_message.content.unwrap_or_default(),
-                name: None,
-            },
-            "user" => Message::User {
-                content: db_message.content.unwrap_or_default(),
-                name: None,
-            },
-            "assistant" => Message::Assistant {
-                content: db_message.content,
-                name: None,
-                tool_calls: db_message
-                    .tool_calls
-                    .map(|s| serde_json::from_str(&s).unwrap()),
-            },
-            "tool" => Message::Tool {
-                content: db_message.content.unwrap_or_default(),
-                tool_call_id: db_message.tool_call_id.unwrap_or_default(),
-            },
-            _ => {
-                panic!("Unknown role: {}", db_message.role)
-            }
-        })
-        .collect::<Vec<Message>>();
-    messages.push(Message::User {
-        content: user_msg.clone(),
-        name: None,
-    });
-    sqlx::query(
-        "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-    )
-    .bind(conv_id)
-    .bind("user")
-    .bind(user_msg.clone())
-    .bind(Utc::now().timestamp())
-    .execute(&mut conn)
-    .await
-    .unwrap();
 
-    let mut agent = Agent::new(LLM_URL.to_string(), api_key, conversation.get("model"))
-        .with_observer(ConversationObserver::new(conv_id, conn));
-    agent.send(messages).await;
+    let content = std::fs::read_to_string(nota_agent_home.join("config.json")).unwrap();
+    let cfg: Value = serde_json::from_str(&content).unwrap();
+    let app_id = cfg["app_id"].as_str().expect("app_id is null");
+    let client_secret = cfg["client_secret"]
+        .as_str()
+        .expect("client_secret is null");
+
+    let client = Client::new();
+    let mut bot = Bot::new();
+
+    let conversation_store = ConversationStore { conn, conv_id };
+    let api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY not set");
+    let agent: Agent<ConversationObserver> =
+        Agent::new(LLM_URL.to_string(), api_key, conversation.get("model"));
+
+    let mut bot_handler = BotHandler::new(agent, conversation_store);
+    bot.run(&client, app_id, client_secret, &mut bot_handler)
+        .await;
+    return;
 }
 
-struct ConversationObserver {
-    conv_id: i64,
+struct ConversationStore {
     conn: SqliteConnection,
+    conv_id: i64,
+}
+
+impl ConversationStore {
+    pub async fn get(&mut self) -> Vec<Message> {
+        let db_messages =
+            sqlx::query_as::<_, DbMessage>("SELECT * FROM messages WHERE conversation_id = ?")
+                .bind(self.conv_id)
+                .fetch_all(&mut self.conn)
+                .await
+                .unwrap();
+        let messages = db_messages
+            .into_iter()
+            .map(|db_message| match db_message.role.as_str() {
+                "system" => Message::System {
+                    content: db_message.content.unwrap_or_default(),
+                    name: None,
+                },
+                "user" => Message::User {
+                    content: db_message.content.unwrap_or_default(),
+                    name: None,
+                },
+                "assistant" => Message::Assistant {
+                    content: db_message.content,
+                    name: None,
+                    tool_calls: db_message
+                        .tool_calls
+                        .map(|s| serde_json::from_str(&s).unwrap()),
+                },
+                "tool" => Message::Tool {
+                    content: db_message.content.unwrap_or_default(),
+                    tool_call_id: db_message.tool_call_id.unwrap_or_default(),
+                },
+                _ => {
+                    panic!("Unknown role: {}", db_message.role)
+                }
+            })
+            .collect::<Vec<Message>>();
+        messages
+    }
+
+    pub async fn append(
+        &mut self,
+        role: &str,
+        content: Option<String>,
+        tool_calls: Option<String>,
+        tool_call_id: Option<String>,
+    ) {
+        sqlx::query(
+            "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(self.conv_id)
+        .bind(role)
+        .bind(content)
+        .bind(tool_calls)
+        .bind(tool_call_id)
+        .bind(Utc::now().timestamp())
+        .execute(&mut self.conn)
+        .await
+        .unwrap();
+    }
+}
+
+pub struct ConversationObserver {
+    conversation_store: ConversationStore,
 }
 
 impl ConversationObserver {
-    pub fn new(conv_id: i64, conn: SqliteConnection) -> Self {
-        Self { conv_id, conn }
+    fn new(conversation_store: ConversationStore) -> Self {
+        Self { conversation_store }
     }
 }
 
 impl AgentObserver for ConversationObserver {
     async fn message_update(&mut self, message: &Message) {
         match message {
+            Message::System {
+                content: _,
+                name: _,
+            } => {}
+            Message::User {
+                content: _,
+                name: _,
+            } => {}
             Message::Assistant {
                 content,
-                name,
+                name: _,
                 tool_calls,
             } => {
                 let tool_calls_json = tool_calls
                     .as_ref()
                     .map(|tc| serde_json::to_string(&tc).unwrap());
-                sqlx::query(
-        "INSERT INTO messages (conversation_id, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?)",
-                )
-                .bind(self.conv_id)
-                .bind("assistant")
-                .bind(content)
-                .bind(tool_calls_json)
-                .bind(Utc::now().timestamp())
-                .execute(&mut self.conn)
-                .await
-                   .unwrap();
+
+                self.conversation_store
+                    .append("assistant", content.clone(), tool_calls_json, None)
+                    .await;
             }
             Message::Tool {
                 content,
                 tool_call_id,
             } => {
-                sqlx::query(
-                    "INSERT INTO messages (conversation_id, role, content, tool_call_id, created_at) VALUES (?, ?, ?, ?, ?)",
-                            )
-                            .bind(self.conv_id)
-                            .bind("tool")
-                            .bind(content)
-                            .bind(tool_call_id)
-                            .bind(Utc::now().timestamp())
-                            .execute(&mut self.conn)
-                            .await
-                            .unwrap();
+                self.conversation_store
+                    .append(
+                        "tool",
+                        Some(content.clone()),
+                        None,
+                        Some(tool_call_id.clone()),
+                    )
+                    .await;
             }
-            Message::System { content, name } => todo!(),
-            Message::User { content, name } => todo!(),
+        }
+    }
+}
+
+pub struct BotHandler {
+    agent: Agent<ConversationObserver>,
+    conversation_store: ConversationStore,
+}
+
+impl BotHandler {
+    fn new(agent: Agent<ConversationObserver>, conversation_store: ConversationStore) -> Self {
+        Self {
+            agent,
+            conversation_store,
+        }
+    }
+}
+
+impl MessageHandler for BotHandler {
+    async fn reply(&mut self, content: &str) -> String {
+        self.conversation_store
+            .append("user", Some(content.to_string()), None, None)
+            .await;
+        let messages = self.agent.send(self.conversation_store.get().await).await;
+        for message in &messages {
+            match message {
+                Message::System {
+                    content: _,
+                    name: _,
+                } => {}
+                Message::User {
+                    content: _,
+                    name: _,
+                } => {}
+                Message::Assistant {
+                    content,
+                    name: _,
+                    tool_calls,
+                } => {
+                    let tool_calls_json = tool_calls
+                        .as_ref()
+                        .map(|tc| serde_json::to_string(&tc).unwrap());
+
+                    self.conversation_store
+                        .append("assistant", content.clone(), tool_calls_json, None)
+                        .await;
+                }
+                Message::Tool {
+                    content,
+                    tool_call_id,
+                } => {
+                    self.conversation_store
+                        .append(
+                            "tool",
+                            Some(content.clone()),
+                            None,
+                            Some(tool_call_id.clone()),
+                        )
+                        .await;
+                }
+            }
+        }
+
+        match messages.last() {
+            Some(Message::Assistant {
+                content,
+                name: _,
+                tool_calls: _,
+            }) => return content.clone().unwrap_or_default(),
+            _ => String::new(),
         }
     }
 }
