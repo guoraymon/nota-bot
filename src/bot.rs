@@ -254,7 +254,7 @@ impl BotApi {
     pub fn new(client: &Client, token_manager: Arc<TokenManager>) -> Self {
         BotApi {
             client: client.to_owned(),
-            token_manager: token_manager,
+            token_manager,
         }
     }
 
