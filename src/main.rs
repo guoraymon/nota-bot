@@ -5,9 +5,11 @@ mod db;
 mod skills;
 mod tools;
 
+use std::sync::Arc;
+
 use crate::{
     agent::{Agent, AgentObserver},
-    bot::{Bot, BotApi, TokenManager},
+    bot::{Bot, BotApi, IncomingMessage, TokenManager},
     chat_completions::Message,
     db::DbMessage,
 };
@@ -100,17 +102,17 @@ async fn main() {
         .as_str()
         .expect("client_secret is null");
 
-    let mut conversation_store = ConversationStore { conn, conv_id };
     let client = Client::new();
-    let tokens = TokenManager::new(&client, app_id, client_secret);
-    let mut bot = Bot::new(&client, app_id, client_secret);
-    let mut bot_api = BotApi::new(&client, tokens);
+    let token_manager = Arc::new(TokenManager::new(&client, app_id, client_secret));
+    let mut bot = Bot::new(&client, token_manager.clone());
+    let bot_api = BotApi::new(&client, token_manager.clone());
 
     let api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY not set");
     let mut agent: Agent<ConversationObserver> =
         Agent::new(LLM_URL.to_string(), api_key, conversation.get("model"));
 
     let (tx, mut rx) = mpsc::channel::<IncomingMessage>(100);
+    let mut conversation_store = ConversationStore { conn, conv_id };
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             conversation_store
@@ -172,12 +174,6 @@ async fn main() {
     bot.run(tx).await;
 
     return;
-}
-
-pub struct IncomingMessage {
-    user_openid: String,
-    msg_id: String,
-    content: String,
 }
 
 struct ConversationStore {

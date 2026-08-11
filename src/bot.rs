@@ -1,16 +1,17 @@
 // https://bot.q.qq.com/wiki/develop/api-v2/
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use futures_util::{SinkExt, StreamExt};
 use rand::RngExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::{Mutex, mpsc::Sender};
 use tokio_tungstenite::tungstenite::Message;
-
-use crate::IncomingMessage;
 
 const API_BASE: &str = "https://api.bot.qq.com";
 
@@ -61,6 +62,12 @@ struct ClientProperties {
     device: String,
 }
 
+pub struct IncomingMessage {
+    pub user_openid: String,
+    pub msg_id: String,
+    pub content: String,
+}
+
 pub struct Bot {
     api: BotApi,
     session_id: Option<String>,
@@ -68,8 +75,7 @@ pub struct Bot {
 }
 
 impl Bot {
-    pub fn new(client: &Client, app_id: &str, client_secret: &str) -> Self {
-        let tokens = TokenManager::new(client, app_id, client_secret);
+    pub fn new(client: &Client, tokens: Arc<TokenManager>) -> Self {
         let api = BotApi::new(client, tokens);
         Self {
             api,
@@ -80,7 +86,6 @@ impl Bot {
 
     pub async fn run(&mut self, tx: Sender<IncomingMessage>) {
         let mut attempt = 0;
-        let gateway_url = self.api.get_gateway_url().await;
         loop {
             if attempt > 0 {
                 let half: u64 = (2u64).saturating_pow(attempt).min(30) * 1000 / 2;
@@ -89,6 +94,7 @@ impl Bot {
                 tokio::time::sleep(delay).await;
             }
 
+            let gateway_url = self.api.get_gateway_url().await;
             let (stream, _) = match tokio_tungstenite::connect_async(gateway_url.clone()).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -188,7 +194,6 @@ impl Bot {
                                             }
                                         }
                                         OP_RECONNECT => {
-                                            attempt += 1;
                                             break;
                                         }
                                         OP_INVALID_SESSION => {
@@ -239,23 +244,23 @@ impl Bot {
 
 pub struct BotApi {
     client: Client,
-    tokens: TokenManager,
+    tokens: Arc<TokenManager>,
 }
 
 impl BotApi {
-    pub fn new(client: &Client, tokens: TokenManager) -> Self {
+    pub fn new(client: &Client, tokens: Arc<TokenManager>) -> Self {
         BotApi {
             client: client.to_owned(),
             tokens: tokens,
         }
     }
 
-    async fn auth_header(&mut self) -> String {
+    async fn auth_header(&self) -> String {
         let access_token = self.tokens.get_token().await;
         format!("QQBot {access_token}")
     }
 
-    pub async fn get_gateway_url(&mut self) -> String {
+    pub async fn get_gateway_url(&self) -> String {
         #[derive(Deserialize)]
         struct Rep {
             url: String,
@@ -271,10 +276,10 @@ impl BotApi {
             .json()
             .await
             .unwrap();
-        return rep.url;
+        rep.url
     }
 
-    pub async fn send_user_msg(&mut self, user_openid: &str, msg_id: &str, content: &str) {
+    pub async fn send_user_msg(&self, user_openid: &str, msg_id: &str, content: &str) {
         let json = serde_json::json!({
             "content": content,
             "msg_type": 0,
@@ -297,13 +302,13 @@ impl BotApi {
 const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 
 pub struct TokenManager {
-    state: Option<TokenState>,
     client: Client,
     app_id: String,
     client_secret: String,
+    cache: Mutex<Option<TokenCache>>,
 }
 
-struct TokenState {
+struct TokenCache {
     token: String,
     expires_at: Instant,
 }
@@ -311,56 +316,54 @@ struct TokenState {
 impl TokenManager {
     pub fn new(client: &Client, app_id: &str, client_secret: &str) -> Self {
         Self {
-            state: None,
             client: client.clone(),
             app_id: app_id.to_owned(),
             client_secret: client_secret.to_owned(),
+            cache: Mutex::new(None),
         }
     }
 
-    pub fn is_expired(&self) -> bool {
-        match &self.state {
-            None => true,
-            Some(state) => Instant::now() >= state.expires_at - REFRESH_MARGIN,
+    pub async fn get_token(&self) -> String {
+        let mut cache = self.cache.lock().await;
+        if let Some(s) = cache.as_ref()
+            && Instant::now() < s.expires_at - REFRESH_MARGIN
+        {
+            return s.token.clone();
         }
-    }
+        let (access_token, expires_in) = async {
+            #[derive(Serialize)]
+            #[allow(non_snake_case)]
+            struct Req {
+                appId: String,
+                clientSecret: String,
+            }
 
-    pub async fn get_token(&mut self) -> String {
-        if self.is_expired() {
-            let (access_token, expires_in) =
-                get_access_token(&self.client, &self.app_id, &self.client_secret).await;
-            self.state = Some(TokenState {
-                token: access_token,
-                expires_at: Instant::now() + Duration::from_secs(expires_in),
-            });
+            #[derive(Deserialize)]
+            struct Rep {
+                access_token: String,
+                expires_in: String,
+            }
+
+            let res = self
+                .client
+                .post(format!("{API_BASE}/app/getAppAccessToken"))
+                .json(&Req {
+                    appId: self.app_id.to_owned(),
+                    clientSecret: self.client_secret.to_owned(),
+                })
+                .send()
+                .await
+                .unwrap();
+            let rep: Rep = res.json().await.unwrap();
+            (rep.access_token, rep.expires_in.parse::<u64>().unwrap())
         }
-        return self.state.as_ref().unwrap().token.clone();
-    }
-}
+        .await;
 
-async fn get_access_token(client: &Client, app_id: &str, client_secret: &str) -> (String, u64) {
-    #[derive(Serialize)]
-    #[allow(non_snake_case)]
-    struct Req<'a> {
-        appId: &'a str,
-        clientSecret: &'a str,
-    }
+        *cache = Some(TokenCache {
+            token: access_token.clone(),
+            expires_at: Instant::now() + Duration::from_secs(expires_in),
+        });
 
-    #[derive(Deserialize)]
-    struct Rep {
-        access_token: String,
-        expires_in: String,
+        access_token
     }
-
-    let res = client
-        .post(format!("{API_BASE}/app/getAppAccessToken"))
-        .json(&Req {
-            appId: app_id,
-            clientSecret: client_secret,
-        })
-        .send()
-        .await
-        .unwrap();
-    let rep: Rep = res.json().await.unwrap();
-    return (rep.access_token, rep.expires_in.parse::<u64>().unwrap());
 }
