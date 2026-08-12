@@ -6,19 +6,14 @@ use crate::{
     tools::{Bash, EditFile, Glob, LoadSkill, ReadFile, ToolHandler, WriteFile},
 };
 
-pub trait AgentObserver {
-    async fn message_update(&mut self, _message: &Message) {}
-}
-
-pub struct Agent<O: AgentObserver> {
+pub struct Agent {
     client: Client,
     api_url: String,
     api_key: String,
     model: String,
-    observer: Option<O>,
 }
 
-impl<O: AgentObserver> Agent<O> {
+impl Agent {
     pub fn new(api_url: String, api_key: String, model: String) -> Self {
         let client = Client::new();
 
@@ -27,13 +22,7 @@ impl<O: AgentObserver> Agent<O> {
             api_url,
             api_key,
             model,
-            observer: None,
         }
-    }
-
-    pub fn with_observer(mut self, observer: O) -> Self {
-        self.observer = Some(observer);
-        self
     }
 
     pub async fn send(&mut self, messages: Vec<Message>) -> Vec<Message> {
@@ -130,9 +119,6 @@ impl<O: AgentObserver> Agent<O> {
                     name: None,
                     tool_calls: choice.message.tool_calls.clone(),
                 };
-                if let Some(obs) = self.observer.as_mut() {
-                    obs.message_update(&message).await;
-                }
                 result.push(message.clone());
                 request.messages.push(message);
 
@@ -158,9 +144,6 @@ impl<O: AgentObserver> Agent<O> {
                             content: res.clone(),
                             tool_call_id: tool_call.id.clone(),
                         };
-                        if let Some(obs) = self.observer.as_mut() {
-                            obs.message_update(&message).await;
-                        }
                         result.push(message.clone());
                         request.messages.push(message);
                     }

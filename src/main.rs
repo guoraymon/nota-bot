@@ -8,7 +8,7 @@ mod tools;
 use std::sync::Arc;
 
 use crate::{
-    agent::{Agent, AgentObserver},
+    agent::Agent,
     bot::{Bot, BotApi, IncomingMessage, TokenManager},
     chat_completions::Message,
     db::DbMessage,
@@ -108,8 +108,7 @@ async fn main() {
     let bot_api = BotApi::new(&client, token_manager.clone());
 
     let api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY not set");
-    let mut agent: Agent<ConversationObserver> =
-        Agent::new(LLM_URL.to_string(), api_key, conversation.get("model"));
+    let mut agent: Agent = Agent::new(LLM_URL.to_string(), api_key, conversation.get("model"));
 
     let (tx, mut rx) = mpsc::channel::<IncomingMessage>(100);
     let mut conversation_store = ConversationStore { conn, conv_id };
@@ -238,56 +237,5 @@ impl ConversationStore {
         .execute(&mut self.conn)
         .await
         .unwrap();
-    }
-}
-
-pub struct ConversationObserver {
-    conversation_store: ConversationStore,
-}
-
-impl ConversationObserver {
-    fn new(conversation_store: ConversationStore) -> Self {
-        Self { conversation_store }
-    }
-}
-
-impl AgentObserver for ConversationObserver {
-    async fn message_update(&mut self, message: &Message) {
-        match message {
-            Message::System {
-                content: _,
-                name: _,
-            } => {}
-            Message::User {
-                content: _,
-                name: _,
-            } => {}
-            Message::Assistant {
-                content,
-                name: _,
-                tool_calls,
-            } => {
-                let tool_calls_json = tool_calls
-                    .as_ref()
-                    .map(|tc| serde_json::to_string(&tc).unwrap());
-
-                self.conversation_store
-                    .append("assistant", content.clone(), tool_calls_json, None)
-                    .await;
-            }
-            Message::Tool {
-                content,
-                tool_call_id,
-            } => {
-                self.conversation_store
-                    .append(
-                        "tool",
-                        Some(content.clone()),
-                        None,
-                        Some(tool_call_id.clone()),
-                    )
-                    .await;
-            }
-        }
     }
 }
