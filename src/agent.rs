@@ -2,7 +2,8 @@ use reqwest::Client;
 use serde_json::Value;
 
 use crate::{
-    chat_completions::{FinishReason::ToolCalls, Function, Message, Request, Response, Tool},
+    llm::completions,
+    llm::{FinishReason::ToolCalls, Function, Message, Tool, Usage},
     tools::{Bash, EditFile, Glob, LoadSkill, ReadFile, ToolHandler, WriteFile},
 };
 
@@ -11,10 +12,12 @@ pub struct Agent {
     api_url: String,
     api_key: String,
     model: String,
+    messages: Vec<Message>,
+    tools: Option<Vec<Tool>>,
 }
 
 impl Agent {
-    pub fn new(api_url: String, api_key: String, model: String) -> Self {
+    pub fn new(api_url: String, api_key: String, model: String, messages: Vec<Message>) -> Self {
         let client = Client::new();
 
         Self {
@@ -22,13 +25,7 @@ impl Agent {
             api_url,
             api_key,
             model,
-        }
-    }
-
-    pub async fn send(&mut self, messages: Vec<Message>) -> Vec<Message> {
-        let mut request = Request {
-            model: self.model.clone(),
-            messages: messages,
+            messages,
             tools: Some(vec![
                 Tool {
                     tool_type: "function".to_string(),
@@ -79,39 +76,39 @@ impl Agent {
                     },
                 },
             ]),
-        };
-
-        self.agent_loop(&mut request).await
+        }
     }
 
-    async fn agent_loop(&mut self, request: &mut Request) -> Vec<Message> {
-        let mut result = vec![];
+    pub async fn send(&mut self, content: &str) -> TurnResult {
+        self.messages.push(Message::User {
+            content: content.to_owned(),
+            name: None,
+        });
+        self.agent_loop().await
+    }
+
+    async fn agent_loop(&mut self) -> TurnResult {
+        let mut result = TurnResult {
+            messages: vec![],
+            usage: vec![],
+        };
         loop {
-            println!(
-                "request: {}",
-                serde_json::to_string_pretty(&request).unwrap()
-            );
-            let response = self
-                .client
-                .post(self.api_url.clone())
-                .bearer_auth(self.api_key.clone())
-                .json(&request)
-                .send()
-                .await
-                .expect("request failed");
-            if !response.status().is_success() {
-                eprintln!(
-                    "HTTP {}: {}",
-                    response.status(),
-                    response.text().await.unwrap()
-                );
-                return result;
-            }
-            let response: Response = response.json().await.unwrap();
-            println!(
-                "response: {}",
-                serde_json::to_string_pretty(&response).unwrap()
-            );
+            let response = match completions(
+                &self.client,
+                &self.api_url,
+                &self.api_key,
+                &self.model,
+                self.messages.clone(),
+                self.tools.clone(),
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(e) => {
+                    eprintln!("completions failed: {e}");
+                    return result;
+                }
+            };
 
             if let Some(choice) = response.choices.first() {
                 let message = Message::Assistant {
@@ -119,8 +116,9 @@ impl Agent {
                     name: None,
                     tool_calls: choice.message.tool_calls.clone(),
                 };
-                result.push(message.clone());
-                request.messages.push(message);
+                self.messages.push(message.clone());
+                result.messages.push(message);
+                result.usage.push(response.usage);
 
                 // If the model is done, we're done.
                 if choice.finish_reason != ToolCalls {
@@ -144,11 +142,15 @@ impl Agent {
                             content: res.clone(),
                             tool_call_id: tool_call.id.clone(),
                         };
-                        result.push(message.clone());
-                        request.messages.push(message);
+                        self.messages.push(message);
                     }
                 };
             }
         }
     }
+}
+
+pub struct TurnResult {
+    pub messages: Vec<Message>,
+    pub usage: Vec<Usage>,
 }

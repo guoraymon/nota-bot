@@ -1,7 +1,51 @@
 // https://api-docs.deepseek.com/zh-cn/api/create-chat-completion
 
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+pub async fn completions(
+    client: &Client,
+    url: &str,
+    token: &str,
+    model: &str,
+    messages: Vec<Message>,
+    tools: Option<Vec<Tool>>,
+) -> Result<Response, String> {
+    let request = Request {
+        model: model.to_owned(),
+        messages,
+        tools,
+    };
+    println!(
+        "request: {}",
+        serde_json::to_string_pretty(&request).unwrap()
+    );
+
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("HTTP {status}: {body}"));
+    }
+    let response = response
+        .json()
+        .await
+        .map_err(|e| format!("json parse failed: {e}"))?;
+
+    println!(
+        "response: {}",
+        serde_json::to_string_pretty(&response).unwrap()
+    );
+
+    Ok(response)
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -58,14 +102,14 @@ pub enum Message {
 //     max,
 // }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
     #[serde(rename = "type")]
     pub tool_type: String,
     pub function: Function,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Function {
     pub description: String,
     pub name: String,
@@ -81,7 +125,7 @@ pub struct Response {
     model: String,
     system_fingerprint: String,
     object: String,
-    usage: Usage,
+    pub usage: Usage,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

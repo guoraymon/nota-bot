@@ -1,7 +1,7 @@
 mod agent;
 mod bot;
-mod chat_completions;
 mod db;
+mod llm;
 mod skills;
 mod tools;
 
@@ -10,8 +10,8 @@ use std::sync::Arc;
 use crate::{
     agent::Agent,
     bot::{Bot, BotApi, IncomingMessage, TokenManager},
-    chat_completions::Message,
     db::DbMessage,
+    llm::Message,
 };
 use chrono::Utc;
 use reqwest::Client;
@@ -107,27 +107,25 @@ async fn main() {
     let mut bot = Bot::new(&client, token_manager.clone());
     let bot_api = BotApi::new(&client, token_manager.clone());
 
+    let mut conversation_store = ConversationStore { conn, conv_id };
     let api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY not set");
-    let mut agent: Agent = Agent::new(LLM_URL.to_string(), api_key, conversation.get("model"));
+    let mut agent: Agent = Agent::new(
+        LLM_URL.to_string(),
+        api_key,
+        conversation.get("model"),
+        conversation_store.get().await,
+    );
 
     let (tx, mut rx) = mpsc::channel::<IncomingMessage>(100);
-    let mut conversation_store = ConversationStore { conn, conv_id };
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             conversation_store
                 .append("user", Some(msg.content.to_string()), None, None)
                 .await;
-            let messages = agent.send(conversation_store.get().await).await;
-            for message in &messages {
+            let mut last_msg = None;
+            let result = agent.send(&msg.content).await;
+            for message in result.messages {
                 match message {
-                    Message::System {
-                        content: _,
-                        name: _,
-                    } => {}
-                    Message::User {
-                        content: _,
-                        name: _,
-                    } => {}
                     Message::Assistant {
                         content,
                         name: _,
@@ -140,6 +138,8 @@ async fn main() {
                         conversation_store
                             .append("assistant", content.clone(), tool_calls_json, None)
                             .await;
+
+                        last_msg = content.clone();
                     }
                     Message::Tool {
                         content,
@@ -154,17 +154,13 @@ async fn main() {
                             )
                             .await;
                     }
+                    _ => {}
                 }
             }
 
-            if let Some(Message::Assistant {
-                content: Some(c),
-                name: _,
-                tool_calls: _,
-            }) = messages.last()
-            {
+            if let Some(last_msg) = last_msg {
                 bot_api
-                    .send_user_msg(&msg.user_openid, &msg.msg_id, c)
+                    .send_user_msg(&msg.user_openid, &msg.msg_id, &last_msg)
                     .await;
             }
         }
