@@ -30,14 +30,12 @@ pub async fn completions(
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     let status = response.status();
+    let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
         return Err(format!("HTTP {status}: {body}"));
     }
-    let response = response
-        .json()
-        .await
-        .map_err(|e| format!("json parse failed: {e}"))?;
+    let response =
+        serde_json::from_str(&body).map_err(|e| format!("json parse failed: {e}\n{body}"))?;
 
     println!(
         "response: {}",
@@ -123,7 +121,7 @@ pub struct Response {
     pub choices: Vec<Choice>,
     created: i64,
     model: String,
-    system_fingerprint: String,
+    system_fingerprint: Option<String>,
     object: String,
     pub usage: Usage,
 }
@@ -184,12 +182,22 @@ enum Role {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Usage {
-    pub completion_tokens: isize,
     pub prompt_tokens: isize,
-    pub prompt_cache_hit_tokens: isize,
-    pub prompt_cache_miss_tokens: isize,
+    pub completion_tokens: isize,
     pub total_tokens: isize,
+
+    // deepseek only
+    pub prompt_cache_hit_tokens: Option<isize>,
+    // deepseek only
+    pub prompt_cache_miss_tokens: Option<isize>,
+
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
     pub completion_tokens_details: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PromptTokensDetails {
+    pub cached_tokens: isize,
 }
 
 #[cfg(test)]
@@ -581,8 +589,8 @@ mod tests {
         let usage = &resp.usage;
         assert_eq!(usage.completion_tokens, 12);
         assert_eq!(usage.prompt_tokens, 34);
-        assert_eq!(usage.prompt_cache_hit_tokens, 10);
-        assert_eq!(usage.prompt_cache_miss_tokens, 24);
+        assert_eq!(usage.prompt_cache_hit_tokens, Some(10));
+        assert_eq!(usage.prompt_cache_miss_tokens, Some(24));
         assert_eq!(usage.total_tokens, 46);
         assert_eq!(
             usage.completion_tokens_details["reasoning_tokens"],

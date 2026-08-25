@@ -5,7 +5,7 @@ mod llm;
 mod skills;
 mod tools;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     agent::{Agent, AgentMessage},
@@ -15,11 +15,32 @@ use crate::{
 };
 use chrono::Utc;
 use reqwest::Client;
-use serde_json::Value;
+use serde::Deserialize;
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 use tokio::sync::mpsc;
 
-const LLM_URL: &str = "https://api.deepseek.com/chat/completions";
+#[derive(Deserialize)]
+struct Config {
+    app_id: String,
+    client_secret: String,
+    #[serde(rename = "defaultProvider")]
+    default_provider: String,
+    #[serde(rename = "defaultModel")]
+    default_model: String,
+    providers: HashMap<String, ProviderConfig>,
+}
+
+#[derive(Deserialize)]
+struct ProviderConfig {
+    url: String,
+    key: String,
+    models: HashMap<String, ModelConfig>,
+}
+
+#[derive(Deserialize)]
+struct ModelConfig {
+    model: String,
+}
 
 #[tokio::main]
 async fn main() {
@@ -96,23 +117,30 @@ async fn main() {
     let conv_id: i64 = conversation.get("id");
 
     let content = std::fs::read_to_string(nota_agent_home.join("config.json")).unwrap();
-    let cfg: Value = serde_json::from_str(&content).unwrap();
-    let app_id = cfg["app_id"].as_str().expect("app_id is null");
-    let client_secret = cfg["client_secret"]
-        .as_str()
-        .expect("client_secret is null");
+    let config: Config = serde_json::from_str(&content).unwrap();
+    let default_provider = config
+        .providers
+        .get(&config.default_provider)
+        .expect("default provider error");
+    let default_model = default_provider
+        .models
+        .get(&config.default_model)
+        .expect("default model error");
 
     let client = Client::new();
-    let token_manager = Arc::new(TokenManager::new(&client, app_id, client_secret));
+    let token_manager = Arc::new(TokenManager::new(
+        &client,
+        &config.app_id,
+        &config.client_secret,
+    ));
     let mut bot = Bot::new(&client, token_manager.clone());
     let bot_api = BotApi::new(&client, token_manager.clone());
 
     let mut conversation_store = ConversationStore { conn, conv_id };
-    let api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY not set");
     let mut agent: Agent = Agent::new(
-        LLM_URL.to_string(),
-        api_key,
-        conversation.get("model"),
+        default_provider.url.clone(),
+        default_provider.key.clone(),
+        default_model.model.clone(),
         conversation_store.get().await,
     );
 
@@ -127,8 +155,7 @@ async fn main() {
 
             let mut prompt_tokens = 0;
             let mut completion_tokens = 0;
-            let mut cache_hit = 0;
-            let mut cache_miss = 0;
+            let mut cached_tokens = 0;
 
             for message in result {
                 match message {
@@ -150,8 +177,12 @@ async fn main() {
                         if let Some(usage) = usage {
                             prompt_tokens += usage.prompt_tokens;
                             completion_tokens += usage.completion_tokens;
-                            cache_hit += usage.prompt_cache_hit_tokens;
-                            cache_miss += usage.prompt_cache_miss_tokens;
+                            if let Some(hit_tokens) = usage.prompt_cache_hit_tokens {
+                                cached_tokens += hit_tokens;
+                            } else if let Some(prompt_tokens_details) = usage.prompt_tokens_details
+                            {
+                                cached_tokens += prompt_tokens_details.cached_tokens;
+                            }
                         }
                     }
                     AgentMessage::Tool {
@@ -173,7 +204,11 @@ async fn main() {
             if let Some(last_content) = last_content {
                 let content = format!(
                     "{last_content}\n\n↑{prompt_tokens} ↓{completion_tokens} CH{:.2}%",
-                    cache_hit as f64 / (cache_hit as f64 + cache_miss as f64) * 100f64
+                    if cached_tokens > 0 {
+                        cached_tokens as f64 / prompt_tokens as f64 * 100f64
+                    } else {
+                        0f64
+                    }
                 );
                 bot_api
                     .send_user_msg(&msg.user_openid, &msg.msg_id, &content)
