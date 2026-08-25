@@ -2,8 +2,7 @@ use reqwest::Client;
 use serde_json::Value;
 
 use crate::{
-    llm::completions,
-    llm::{FinishReason::ToolCalls, Function, Message, Tool, Usage},
+    llm::{FinishReason::ToolCalls, Function, Message, Tool, ToolCall, Usage, completions},
     tools::{Bash, EditFile, Glob, LoadSkill, ReadFile, ToolHandler, WriteFile},
 };
 
@@ -79,7 +78,7 @@ impl Agent {
         }
     }
 
-    pub async fn send(&mut self, content: &str) -> TurnResult {
+    pub async fn send(&mut self, content: &str) -> Vec<AgentMessage> {
         self.messages.push(Message::User {
             content: content.to_owned(),
             name: None,
@@ -87,11 +86,8 @@ impl Agent {
         self.agent_loop().await
     }
 
-    async fn agent_loop(&mut self) -> TurnResult {
-        let mut result = TurnResult {
-            messages: vec![],
-            usage: vec![],
-        };
+    async fn agent_loop(&mut self) -> Vec<AgentMessage> {
+        let mut result = vec![];
         loop {
             let response = match completions(
                 &self.client,
@@ -111,14 +107,17 @@ impl Agent {
             };
 
             if let Some(choice) = response.choices.first() {
-                let message = Message::Assistant {
+                self.messages.push(Message::Assistant {
                     content: choice.message.content.clone(),
                     name: None,
                     tool_calls: choice.message.tool_calls.clone(),
-                };
-                self.messages.push(message.clone());
-                result.messages.push(message);
-                result.usage.push(response.usage);
+                });
+
+                result.push(AgentMessage::Assistant {
+                    content: choice.message.content.clone().unwrap_or_default(),
+                    tool_calls: choice.message.tool_calls.clone(),
+                    usage: Some(response.usage),
+                });
 
                 // If the model is done, we're done.
                 if choice.finish_reason != ToolCalls {
@@ -143,6 +142,11 @@ impl Agent {
                             tool_call_id: tool_call.id.clone(),
                         };
                         self.messages.push(message);
+
+                        result.push(AgentMessage::Tool {
+                            content: res.clone(),
+                            tool_call_id: tool_call.id.clone(),
+                        });
                     }
                 };
             }
@@ -150,7 +154,14 @@ impl Agent {
     }
 }
 
-pub struct TurnResult {
-    pub messages: Vec<Message>,
-    pub usage: Vec<Usage>,
+pub enum AgentMessage {
+    Assistant {
+        content: String,
+        tool_calls: Option<Vec<ToolCall>>,
+        usage: Option<Usage>,
+    },
+    Tool {
+        content: String,
+        tool_call_id: String,
+    },
 }

@@ -184,12 +184,12 @@ enum Role {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Usage {
-    completion_tokens: isize,
-    prompt_tokens: isize,
-    prompt_cache_hit_tokens: isize,
-    prompt_cache_miss_tokens: isize,
-    total_tokens: isize,
-    completion_tokens_details: Value,
+    pub completion_tokens: isize,
+    pub prompt_tokens: isize,
+    pub prompt_cache_hit_tokens: isize,
+    pub prompt_cache_miss_tokens: isize,
+    pub total_tokens: isize,
+    pub completion_tokens_details: Value,
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ mod tools;
 use std::sync::Arc;
 
 use crate::{
-    agent::Agent,
+    agent::{Agent, AgentMessage},
     bot::{Bot, BotApi, IncomingMessage, TokenManager},
     db::DbMessage,
     llm::Message,
@@ -122,26 +122,39 @@ async fn main() {
             conversation_store
                 .append("user", Some(msg.content.to_string()), None, None)
                 .await;
-            let mut last_msg = None;
+            let mut last_content = None;
             let result = agent.send(&msg.content).await;
-            for message in result.messages {
+
+            let mut prompt_tokens = 0;
+            let mut completion_tokens = 0;
+            let mut cache_hit = 0;
+            let mut cache_miss = 0;
+
+            for message in result {
                 match message {
-                    Message::Assistant {
+                    AgentMessage::Assistant {
                         content,
-                        name: _,
                         tool_calls,
+                        usage,
                     } => {
                         let tool_calls_json = tool_calls
                             .as_ref()
                             .map(|tc| serde_json::to_string(&tc).unwrap());
 
                         conversation_store
-                            .append("assistant", content.clone(), tool_calls_json, None)
+                            .append("assistant", Some(content.clone()), tool_calls_json, None)
                             .await;
 
-                        last_msg = content.clone();
+                        last_content = Some(content);
+
+                        if let Some(usage) = usage {
+                            prompt_tokens += usage.prompt_tokens;
+                            completion_tokens += usage.completion_tokens;
+                            cache_hit += usage.prompt_cache_hit_tokens;
+                            cache_miss += usage.prompt_cache_miss_tokens;
+                        }
                     }
-                    Message::Tool {
+                    AgentMessage::Tool {
                         content,
                         tool_call_id,
                     } => {
@@ -154,13 +167,16 @@ async fn main() {
                             )
                             .await;
                     }
-                    _ => {}
                 }
             }
 
-            if let Some(last_msg) = last_msg {
+            if let Some(last_content) = last_content {
+                let content = format!(
+                    "{last_content}\n\n↑{prompt_tokens} ↓{completion_tokens} CH{:.2}%",
+                    cache_hit as f64 / (cache_hit as f64 + cache_miss as f64) * 100f64
+                );
                 bot_api
-                    .send_user_msg(&msg.user_openid, &msg.msg_id, &last_msg)
+                    .send_user_msg(&msg.user_openid, &msg.msg_id, &content)
                     .await;
             }
         }
