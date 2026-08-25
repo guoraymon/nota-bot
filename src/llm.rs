@@ -1,5 +1,7 @@
 // https://api-docs.deepseek.com/zh-cn/api/create-chat-completion
 
+use std::time::{Duration, Instant};
+
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,7 +13,7 @@ pub async fn completions(
     model: &str,
     messages: Vec<Message>,
     tools: Option<Vec<Tool>>,
-) -> Result<Response, String> {
+) -> Result<(Response, Duration), String> {
     let request = Request {
         model: model.to_owned(),
         messages,
@@ -22,6 +24,7 @@ pub async fn completions(
         serde_json::to_string_pretty(&request).unwrap()
     );
 
+    let started = Instant::now();
     let response = client
         .post(url)
         .bearer_auth(token)
@@ -31,6 +34,8 @@ pub async fn completions(
         .map_err(|e| format!("request failed: {e}"))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
+    let elapsed = started.elapsed();
+
     if !status.is_success() {
         return Err(format!("HTTP {status}: {body}"));
     }
@@ -42,7 +47,7 @@ pub async fn completions(
         serde_json::to_string_pretty(&response).unwrap()
     );
 
-    Ok(response)
+    Ok((response, elapsed))
 }
 
 #[derive(Debug, Serialize, Deserialize)]

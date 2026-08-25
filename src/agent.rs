@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use reqwest::Client;
 use serde_json::Value;
 
@@ -89,7 +91,7 @@ impl Agent {
     async fn agent_loop(&mut self) -> Vec<AgentMessage> {
         let mut result = vec![];
         loop {
-            let response = match completions(
+            let (response, elapsed) = match completions(
                 &self.client,
                 &self.api_url,
                 &self.api_key,
@@ -117,6 +119,7 @@ impl Agent {
                     content: choice.message.content.clone().unwrap_or_default(),
                     tool_calls: choice.message.tool_calls.clone(),
                     usage: Some(response.usage),
+                    elapsed,
                 });
 
                 // If the model is done, we're done.
@@ -159,6 +162,7 @@ pub enum AgentMessage {
         content: String,
         tool_calls: Option<Vec<ToolCall>>,
         usage: Option<Usage>,
+        elapsed: Duration,
     },
     Tool {
         content: String,

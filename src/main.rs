@@ -5,7 +5,7 @@ mod llm;
 mod skills;
 mod tools;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{
     agent::{Agent, AgentMessage},
@@ -156,6 +156,7 @@ async fn main() {
             let mut prompt_tokens = 0;
             let mut completion_tokens = 0;
             let mut cached_tokens = 0;
+            let mut total_elapsed = Duration::new(0, 0);
 
             for message in result {
                 match message {
@@ -163,6 +164,7 @@ async fn main() {
                         content,
                         tool_calls,
                         usage,
+                        elapsed,
                     } => {
                         let tool_calls_json = tool_calls
                             .as_ref()
@@ -184,6 +186,8 @@ async fn main() {
                                 cached_tokens += prompt_tokens_details.cached_tokens;
                             }
                         }
+
+                        total_elapsed += elapsed;
                     }
                     AgentMessage::Tool {
                         content,
@@ -203,7 +207,12 @@ async fn main() {
 
             if let Some(last_content) = last_content {
                 let content = format!(
-                    "{last_content}\n\n↑{prompt_tokens} ↓{completion_tokens} CH{:.2}%",
+                    "{last_content}\n\nTPS {:.1} tok/s ↑{prompt_tokens} ↓{completion_tokens} CH{:.2}%",
+                    if total_elapsed.as_secs_f64() > 0.0 {
+                        completion_tokens as f64 / total_elapsed.as_secs_f64()
+                    } else {
+                        0.0
+                    },
                     if cached_tokens > 0 {
                         cached_tokens as f64 / prompt_tokens as f64 * 100f64
                     } else {
