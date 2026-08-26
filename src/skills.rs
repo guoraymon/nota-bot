@@ -2,15 +2,20 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub location: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SkillHead {
     name: String,
     description: String,
 }
 
-pub fn list_skills(dir: &PathBuf) -> String {
-    let path = dir.join("skills");
-    let mut skills = String::new();
+pub fn find_skills(path: &PathBuf) -> Vec<Skill> {
+    let mut skills = vec![];
     if let Ok(dir) = std::fs::read_dir(path) {
         for entry in dir.flatten() {
             if !entry.path().is_dir() {
@@ -25,15 +30,14 @@ pub fn list_skills(dir: &PathBuf) -> String {
 
             let parts: Vec<&str> = content.split("---").collect();
             let yaml: SkillHead = serde_yaml::from_str(parts[1].trim()).unwrap();
-            skills.push_str(&format!("- **{}**: {}\n", yaml.name, yaml.description));
+            skills.push(Skill {
+                name: yaml.name,
+                description: yaml.description,
+                location: entry.path().display().to_string(),
+            });
         }
     }
     skills
-}
-
-pub fn load_skill(dir: &PathBuf, name: &str) -> String {
-    let path = dir.join("skills").join(name).join("SKILL.md");
-    std::fs::read_to_string(path).unwrap()
 }
 
 #[cfg(test)]
@@ -49,9 +53,9 @@ mod tests {
         std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
     }
 
-    // 基本格式：每个 skill 渲染成 `- **name**: description`
+    // 基本行为：解析出 name / description / location
     #[test]
-    fn list_formats_skills_as_bullets() {
+    fn find_parses_name_description_and_location() {
         let root = tempdir().unwrap();
         write_skill(
             &root.path().to_path_buf(),
@@ -59,13 +63,23 @@ mod tests {
             "name: greeter\ndescription: says hi\n",
             "body",
         );
-        let out = list_skills(&root.path().to_path_buf());
-        assert_eq!(out, "- **greeter**: says hi\n");
+        let skills = find_skills(&root.path().join("skills").to_path_buf());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "greeter");
+        assert_eq!(skills[0].description, "says hi");
+        assert_eq!(
+            skills[0].location,
+            root.path()
+                .join("skills")
+                .join("greeter")
+                .display()
+                .to_string()
+        );
     }
 
-    // 多个 skill 都应列出
+    // 多个 skill 都应找到（read_dir 顺序无保证，排序后再比）
     #[test]
-    fn list_includes_all_skills() {
+    fn find_includes_all_skills() {
         let root = tempdir().unwrap();
         write_skill(
             &root.path().to_path_buf(),
@@ -79,40 +93,38 @@ mod tests {
             "name: b\ndescription: bb\n",
             "",
         );
-        let out = list_skills(&root.path().to_path_buf());
-        assert!(out.contains("**a**"), "got: {out}");
-        assert!(out.contains("**b**"), "got: {out}");
+        let mut skills = find_skills(&root.path().join("skills").to_path_buf());
+        skills.sort_by(|x, y| x.name.cmp(&y.name));
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
     }
 
-    // 目录下不存在 skills/ 子目录时（read_dir 失败），返回空串不 panic
+    // 目录下不存在 skills/ 子目录时（read_dir 失败），返回空 vec 不 panic
     #[test]
-    fn list_returns_empty_when_no_skills_dir() {
+    fn find_returns_empty_when_no_skills_dir() {
         let root = tempdir().unwrap();
-        let out = list_skills(&root.path().to_path_buf());
-        assert_eq!(out, "");
+        assert!(find_skills(&root.path().to_path_buf()).is_empty());
     }
 
     // 跳过非目录条目（比如 skills/ 下直接放了个文件）
     #[test]
-    fn list_skips_non_directory_entries() {
+    fn find_skips_non_directory_entries() {
         let root = tempdir().unwrap();
-        // 一个正常 skill
         write_skill(
             &root.path().to_path_buf(),
             "good",
             "name: good\ndescription: g\n",
             "",
         );
-        // 一个平铺文件（不是目录）
         std::fs::write(root.path().join("skills").join("README.md"), "x").unwrap();
-        let out = list_skills(&root.path().to_path_buf());
-        assert!(out.contains("**good**"), "got: {out}");
-        assert!(!out.contains("README"), "got: {out}");
+        let skills = find_skills(&root.path().join("skills").to_path_buf());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "good");
     }
 
     // 跳过 SKILL.md 不以 --- 开头（无 frontmatter）的目录
     #[test]
-    fn list_skips_skill_without_frontmatter() {
+    fn find_skips_skill_without_frontmatter() {
         let root = tempdir().unwrap();
         write_skill(
             &root.path().to_path_buf(),
@@ -120,27 +132,11 @@ mod tests {
             "name: good\ndescription: g\n",
             "",
         );
-        // 没有 frontmatter 的 skill
         let plain = root.path().join("skills").join("plain");
         std::fs::create_dir_all(&plain).unwrap();
         std::fs::write(plain.join("SKILL.md"), "just markdown").unwrap();
-        let out = list_skills(&root.path().to_path_buf());
-        assert!(out.contains("**good**"), "got: {out}");
-        assert!(!out.contains("plain"), "got: {out}");
-    }
-
-    // load_skill 读取完整 SKILL.md 内容（含 frontmatter 与正文）
-    #[test]
-    fn load_returns_full_content() {
-        let root = tempdir().unwrap();
-        write_skill(
-            &root.path().to_path_buf(),
-            "s",
-            "name: s\ndescription: d\n",
-            "instructions here",
-        );
-        let out = load_skill(&root.path().to_path_buf(), "s");
-        assert!(out.contains("instructions here"), "got: {out}");
-        assert!(out.contains("name: s"), "got: {out}");
+        let skills = find_skills(&root.path().join("skills").to_path_buf());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "good");
     }
 }

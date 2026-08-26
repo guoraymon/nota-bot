@@ -98,14 +98,35 @@ async fn main() {
                 .await
                 .unwrap();
 
+            let system_prompt = "You are a helpful assistant.";
+            let avaliable_skills = skills::find_skills(&nota_agent_home.join("skills"))
+                .iter()
+                .map(|skill| {
+                    format!(
+                        "<skill>
+                            <name>{}</name>
+                            <description>{}</description>
+                            <location>{}</location>
+                        </skill>",
+                        skill.name, skill.description, skill.location
+                    )
+                })
+                .collect::<Vec<String>>()
+                .join("\n");
+            let skill_prompt = format!(
+                "The following skills provide specialized instructions...
+                Use the read tool to load a skill's file when the task matches its description.
+
+                <available_skills>
+                    {avaliable_skills}
+                </available_skills>"
+            );
+
             let conv_id: i64 = row.get("id");
             sqlx::query("INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)")
             .bind(conv_id)
             .bind("system")
-            .bind(format!(
-                    "You are a helpful assistant.\nSkills available:\n{}\nUse load_skill to get full details when needed.",
-                    skills::list_skills(&dirs::home_dir().unwrap().join(".nota-bot")),
-                ))
+            .bind(format!("{system_prompt}\n{skill_prompt}"))
                 .bind(Utc::now().timestamp())
                 .execute(&mut conn)
                 .await.unwrap();
