@@ -1,10 +1,10 @@
 use crate::tools::ToolHandler;
 
-pub struct WriteFile;
+pub struct Write;
 
-impl ToolHandler for WriteFile {
+impl ToolHandler for Write {
     fn name(&self) -> &str {
-        "write_file"
+        "write"
     }
 
     fn description(&self) -> &str {
@@ -40,13 +40,13 @@ mod tests {
 
     #[test]
     fn name_and_description_contract() {
-        assert_eq!(WriteFile.name(), "write_file");
-        assert!(!WriteFile.description().is_empty());
+        assert_eq!(Write.name(), "write");
+        assert!(!Write.description().is_empty());
     }
 
     #[test]
     fn parameters_require_path_and_content() {
-        let params = WriteFile.parameters();
+        let params = Write.parameters();
         let required = params["required"].as_array().unwrap();
         assert!(required.contains(&json!("path")));
         assert!(required.contains(&json!("content")));
@@ -57,7 +57,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("out.txt");
         let path_str = path.to_str().unwrap();
-        let msg = WriteFile.run(&json!({"path": path_str, "content": "new content"}));
+        let msg = Write.run(&json!({"path": path_str, "content": "new content"}));
         assert_eq!(msg, "File written successfully.");
         assert_eq!(std::fs::read_to_string(path).unwrap(), "new content");
     }
@@ -68,7 +68,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old").unwrap();
-        WriteFile.run(&json!({"path": path.to_str().unwrap(), "content": "new"}));
+        Write.run(&json!({"path": path.to_str().unwrap(), "content": "new"}));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "new");
     }
 }

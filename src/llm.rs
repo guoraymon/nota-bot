@@ -704,7 +704,7 @@ mod tests {
                         {
                             "id": "call_b",
                             "type": "function",
-                            "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/x\"}"}
+                            "function": {"name": "read", "arguments": "{\"path\":\"/tmp/x\"}"}
                         }
                     ]
                 }
@@ -735,7 +735,7 @@ mod tests {
         assert_eq!(tool_calls[0].function.arguments, r#"{"command":"ls"}"#);
 
         assert_eq!(tool_calls[1].id, "call_b");
-        assert_eq!(tool_calls[1].function.name, "read_file");
+        assert_eq!(tool_calls[1].function.name, "read");
         assert_eq!(tool_calls[1].function.arguments, r#"{"path":"/tmp/x"}"#);
     }
 

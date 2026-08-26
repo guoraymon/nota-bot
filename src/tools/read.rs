@@ -1,10 +1,10 @@
 use crate::tools::ToolHandler;
 
-pub struct ReadFile;
+pub struct Read;
 
-impl ToolHandler for ReadFile {
+impl ToolHandler for Read {
     fn name(&self) -> &str {
-        "read_file"
+        "read"
     }
 
     fn description(&self) -> &str {
@@ -38,13 +38,13 @@ mod tests {
 
     #[test]
     fn name_and_description_contract() {
-        assert_eq!(ReadFile.name(), "read_file");
-        assert!(!ReadFile.description().is_empty());
+        assert_eq!(Read.name(), "read");
+        assert!(!Read.description().is_empty());
     }
 
     #[test]
     fn parameters_require_path() {
-        let params = ReadFile.parameters();
+        let params = Read.parameters();
         assert_eq!(params["type"], "object");
         assert!(
             params["required"]
@@ -59,14 +59,14 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         std::fs::write(&tmp, "hello world").unwrap();
         let path = tmp.path().to_str().unwrap();
-        let out = ReadFile.run(&json!({"path": path}));
+        let out = Read.run(&json!({"path": path}));
         assert_eq!(out, "hello world");
     }
 
     // 文件不存在时返回空串（当前行为；记录现状，便于以后改进时察觉）
     #[test]
     fn run_returns_empty_when_missing() {
-        let out = ReadFile.run(&json!({"path": "/this/does/not/exist/xyz"}));
+        let out = Read.run(&json!({"path": "/this/does/not/exist/xyz"}));
         assert_eq!(out, "");
     }
 }

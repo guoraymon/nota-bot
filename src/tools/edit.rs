@@ -1,10 +1,10 @@
 use crate::tools::ToolHandler;
 
-pub struct EditFile;
+pub struct Edit;
 
-impl ToolHandler for EditFile {
+impl ToolHandler for Edit {
     fn name(&self) -> &str {
-        "edit_file"
+        "edit"
     }
 
     fn description(&self) -> &str {
@@ -50,13 +50,13 @@ mod tests {
 
     #[test]
     fn name_and_description_contract() {
-        assert_eq!(EditFile.name(), "edit_file");
-        assert!(!EditFile.description().is_empty());
+        assert_eq!(Edit.name(), "edit");
+        assert!(!Edit.description().is_empty());
     }
 
     #[test]
     fn parameters_require_path_old_new() {
-        let params = EditFile.parameters();
+        let params = Edit.parameters();
         let required = params["required"].as_array().unwrap();
         assert!(required.contains(&json!("path")));
         assert!(required.contains(&json!("old_string")));
@@ -73,7 +73,7 @@ mod tests {
     fn run_replaces_first_occurrence() {
         let dir = tempdir().unwrap();
         let path = write_tmp(&dir, "a.txt", "foo bar foo");
-        EditFile.run(&json!({
+        Edit.run(&json!({
             "path": path,
             "old_string": "foo",
             "new_string": "baz"
@@ -85,7 +85,7 @@ mod tests {
     fn run_replaces_all_when_flag_set() {
         let dir = tempdir().unwrap();
         let path = write_tmp(&dir, "a.txt", "foo bar foo");
-        EditFile.run(&json!({
+        Edit.run(&json!({
             "path": path,
             "old_string": "foo",
             "new_string": "baz",
@@ -101,7 +101,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let original = "unchanged";
         let path = write_tmp(&dir, "a.txt", original);
-        let msg = EditFile.run(&json!({
+        let msg = Edit.run(&json!({
             "path": path,
             "old_string": "NOT_PRESENT",
             "new_string": "x"

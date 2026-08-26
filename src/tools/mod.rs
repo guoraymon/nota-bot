@@ -1,18 +1,14 @@
 use serde_json::Value;
 
 pub mod bash;
-pub mod edit_file;
-pub mod glob;
-pub mod load_skill;
-pub mod read_file;
-pub mod write_file;
+pub mod edit;
+pub mod read;
+pub mod write;
 
 pub use bash::Bash;
-pub use edit_file::EditFile;
-pub use glob::Glob;
-pub use load_skill::LoadSkill;
-pub use read_file::ReadFile;
-pub use write_file::WriteFile;
+pub use edit::Edit;
+pub use read::Read;
+pub use write::Write;
 
 pub trait ToolHandler {
     fn name(&self) -> &str;
@@ -24,22 +20,12 @@ pub trait ToolHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::{
-        bash::Bash, edit_file::EditFile, glob::Glob, load_skill::LoadSkill, read_file::ReadFile,
-        write_file::WriteFile,
-    };
+    use crate::tools::{bash::Bash, edit::Edit, read::Read, write::Write};
 
     // 所有 handler 的 parameters() 都应是 object 类型（合法 JSON Schema 顶层）
     #[test]
     fn parameters_are_objects() {
-        for h in [
-            &Bash as &dyn ToolHandler,
-            &ReadFile,
-            &WriteFile,
-            &EditFile,
-            &Glob,
-            &LoadSkill,
-        ] {
+        for h in [&Bash as &dyn ToolHandler, &Read, &Write, &Edit] {
             let params = h.parameters();
             assert!(
                 params.is_object(),
@@ -53,17 +39,10 @@ mod tests {
     // （API 要求 function name 匹配 ^[a-zA-Z0-9_-]+$；空格会导致模型无法调用 / API 拒绝）
     #[test]
     fn names_are_non_empty_unique_and_snake_case() {
-        let names: Vec<&str> = [
-            &Bash as &dyn ToolHandler,
-            &ReadFile,
-            &WriteFile,
-            &EditFile,
-            &Glob,
-            &LoadSkill,
-        ]
-        .into_iter()
-        .map(|h| h.name())
-        .collect();
+        let names: Vec<&str> = [&Bash as &dyn ToolHandler, &Read, &Write, &Edit]
+            .into_iter()
+            .map(|h| h.name())
+            .collect();
         assert!(names.iter().all(|n| !n.is_empty()), "empty name: {names:?}");
         let unique: std::collections::HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "duplicate names: {names:?}");

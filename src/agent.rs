@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{
     llm::{FinishReason::ToolCalls, Function, Message, Tool, ToolCall, Usage, completions},
-    tools::{Bash, EditFile, Glob, LoadSkill, ReadFile, ToolHandler, WriteFile},
+    tools::{Bash, Edit, Read, ToolHandler, Write},
 };
 
 pub struct Agent {
@@ -39,41 +39,25 @@ impl Agent {
                 Tool {
                     tool_type: "function".to_string(),
                     function: Function {
-                        name: ReadFile.name().to_string(),
-                        description: ReadFile.description().to_string(),
-                        parameters: ReadFile.parameters(),
+                        name: Read.name().to_string(),
+                        description: Read.description().to_string(),
+                        parameters: Read.parameters(),
                     },
                 },
                 Tool {
                     tool_type: "function".to_string(),
                     function: Function {
-                        name: WriteFile.name().to_string(),
-                        description: WriteFile.description().to_string(),
-                        parameters: WriteFile.parameters(),
+                        name: Write.name().to_string(),
+                        description: Write.description().to_string(),
+                        parameters: Write.parameters(),
                     },
                 },
                 Tool {
                     tool_type: "function".to_string(),
                     function: Function {
-                        name: EditFile.name().to_string(),
-                        description: EditFile.description().to_string(),
-                        parameters: EditFile.parameters(),
-                    },
-                },
-                Tool {
-                    tool_type: "function".to_string(),
-                    function: Function {
-                        name: Glob.name().to_string(),
-                        description: Glob.description().to_string(),
-                        parameters: Glob.parameters(),
-                    },
-                },
-                Tool {
-                    tool_type: "function".to_string(),
-                    function: Function {
-                        name: LoadSkill.name().to_string(),
-                        description: LoadSkill.description().to_string(),
-                        parameters: LoadSkill.parameters(),
+                        name: Edit.name().to_string(),
+                        description: Edit.description().to_string(),
+                        parameters: Edit.parameters(),
                     },
                 },
             ]),
@@ -133,11 +117,9 @@ impl Agent {
                             serde_json::from_str(&tool_call.function.arguments).unwrap();
                         let res = match tool_call.function.name.as_str() {
                             "bash" => Bash.run(&args),
-                            "read_file" => ReadFile.run(&args),
-                            "write_file" => WriteFile.run(&args),
-                            "edit_file" => EditFile.run(&args),
-                            "glob" => Glob.run(&args),
-                            "load_skill" => LoadSkill.run(&args),
+                            "read" => Read.run(&args),
+                            "write" => Write.run(&args),
+                            "edit" => Edit.run(&args),
                             other => format!("unknown tool: {other}"),
                         };
                         let message = Message::Tool {
