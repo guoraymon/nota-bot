@@ -1,6 +1,6 @@
 mod agent;
 mod bot;
-mod db;
+mod entities;
 mod llm;
 mod skills;
 mod tools;
@@ -10,13 +10,17 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use crate::{
     agent::{Agent, AgentMessage},
     bot::{Bot, BotApi, IncomingMessage, TokenManager},
-    db::DbMessage,
+    entities::{conversation, message},
     llm::Message,
 };
 use chrono::Utc;
 use reqwest::Client;
+use sea_orm::{
+    ActiveValue, ColumnTrait, ConnectionTrait, Database, DatabaseConnection, DbBackend,
+    EntityTrait, QueryFilter, Schema,
+};
 use serde::Deserialize;
-use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 #[derive(Deserialize)]
@@ -46,96 +50,86 @@ struct ModelConfig {
 async fn main() {
     let nota_agent_home = dirs::home_dir().unwrap().join(".nota-bot");
 
-    let db_path = nota_agent_home.join("default.db");
-    let db_opts = SqliteConnectOptions::new()
-        .create_if_missing(true)
-        .filename(&db_path);
-    let mut conn = SqliteConnection::connect_with(&db_opts).await.unwrap();
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS conversations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            model TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        );
-        "#,
-    )
-    .execute(&mut conn)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conversation_id INTEGER NOT NULL REFERENCES conversations(id),
-            role TEXT NOT NULL,
-            content TEXT,
-            tool_calls TEXT,
-            tool_call_id TEXT,
-            created_at INTEGER NOT NULL
-        );
-        "#,
-    )
-    .execute(&mut conn)
+    let db = Database::connect(format!(
+        "sqlite://{}?mode=rwc",
+        nota_agent_home.join("default.db").display()
+    ))
     .await
     .unwrap();
 
-    let conversation = match sqlx::query("SELECT * FROM conversations ORDER BY id DESC LIMIT 1")
-        .fetch_optional(&mut conn)
+    // init table
+    let schema = Schema::new(DbBackend::Sqlite);
+    db.execute(
+        schema
+            .create_table_from_entity(conversation::Entity)
+            .if_not_exists(),
+    )
+    .await
+    .unwrap();
+    db.execute(
+        schema
+            .create_table_from_entity(message::Entity)
+            .if_not_exists(),
+    )
+    .await
+    .unwrap();
+
+    let conversation = conversation::Entity::find()
+        .order_by_id_desc()
+        .one(&db)
         .await
-        .unwrap()
-    {
-        Some(row) => row,
-        None => {
-            sqlx::query("INSERT INTO conversations (model, created_at) VALUES (?, ?)")
-                .bind("deepseek-v4-flash")
-                .bind(Utc::now().timestamp())
-                .execute(&mut conn)
-                .await
-                .unwrap();
-            let row = sqlx::query("SELECT * FROM conversations ORDER BY id DESC LIMIT 1")
-                .fetch_one(&mut conn)
-                .await
-                .unwrap();
+        .unwrap();
+    if conversation.is_none() {
+        conversation::Entity::insert(conversation::ActiveModel {
+            created_at: ActiveValue::Set(Utc::now().timestamp()),
+            ..Default::default()
+        })
+        .exec(&db)
+        .await
+        .unwrap();
+        let conversation = conversation::Entity::find().one(&db).await.unwrap();
 
-            let system_prompt = "You are a helpful assistant.";
-            let avaliable_skills = skills::find_skills(&nota_agent_home.join("skills"))
-                .iter()
-                .map(|skill| {
-                    format!(
-                        "<skill>
+        let avaliable_skills = skills::find_skills(&nota_agent_home.join("skills"))
+            .iter()
+            .map(|skill| {
+                format!(
+                    "<skill>
                             <name>{}</name>
                             <description>{}</description>
                             <location>{}</location>
                         </skill>",
-                        skill.name, skill.description, skill.location
-                    )
-                })
-                .collect::<Vec<String>>()
-                .join("\n");
-            let skill_prompt = format!(
-                "The following skills provide specialized instructions...
+                    skill.name, skill.description, skill.location
+                )
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+        let skill_prompt = format!(
+            "The following skills provide specialized instructions...
                 Use the read tool to load a skill's file when the task matches its description.
 
                 <available_skills>
                     {avaliable_skills}
                 </available_skills>"
-            );
-
-            let conv_id: i64 = row.get("id");
-            sqlx::query("INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)")
-            .bind(conv_id)
-            .bind("system")
-            .bind(format!("{system_prompt}\n{skill_prompt}"))
-                .bind(Utc::now().timestamp())
-                .execute(&mut conn)
-                .await.unwrap();
-
-            row
+        );
+        let system_prompt = format!("You are a helpful assistant.\n{skill_prompt}");
+        if let Some(conversation) = conversation {
+            message::Entity::insert(message::ActiveModel {
+                conversation_id: ActiveValue::Set(conversation.id),
+                role: ActiveValue::Set("system".to_owned()),
+                content: ActiveValue::Set(Some(system_prompt.to_owned())),
+                payload: ActiveValue::NotSet,
+                created_at: ActiveValue::Set(Utc::now().timestamp()),
+                ..Default::default()
+            })
+            .exec(&db)
+            .await
+            .unwrap();
+        } else {
+            eprintln!("conversation init error");
         }
-    };
+    }
 
-    let conv_id: i64 = conversation.get("id");
+    let conv_id: i64 = conversation.unwrap().id;
 
     let content = std::fs::read_to_string(nota_agent_home.join("config.json")).unwrap();
     let config: Config = serde_json::from_str(&content).unwrap();
@@ -157,7 +151,7 @@ async fn main() {
     let mut bot = Bot::new(&client, token_manager.clone());
     let bot_api = BotApi::new(&client, token_manager.clone());
 
-    let mut conversation_store = ConversationStore { conn, conv_id };
+    let mut conversation_store = ConversationStore { db, conv_id };
     let mut agent: Agent = Agent::new(
         default_provider.url.clone(),
         default_provider.key.clone(),
@@ -169,7 +163,7 @@ async fn main() {
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             conversation_store
-                .append("user", Some(msg.content.to_string()), None, None)
+                .append("user", Some(msg.content.to_string()), None)
                 .await;
             let mut last_content = None;
             let result = agent.send(&msg.content).await;
@@ -187,12 +181,12 @@ async fn main() {
                         usage,
                         elapsed,
                     } => {
-                        let tool_calls_json = tool_calls
-                            .as_ref()
-                            .map(|tc| serde_json::to_string(&tc).unwrap());
-
                         conversation_store
-                            .append("assistant", Some(content.clone()), tool_calls_json, None)
+                            .append(
+                                "assistant",
+                                Some(content.clone()),
+                                Some(json!({"tool_calls": tool_calls})),
+                            )
                             .await;
 
                         last_content = Some(content);
@@ -218,8 +212,7 @@ async fn main() {
                             .append(
                                 "tool",
                                 Some(content.clone()),
-                                None,
-                                Some(tool_call_id.clone()),
+                                Some(json!({"tool_call_id": tool_call_id})),
                             )
                             .await;
                     }
@@ -253,19 +246,18 @@ async fn main() {
 }
 
 struct ConversationStore {
-    conn: SqliteConnection,
+    db: DatabaseConnection,
     conv_id: i64,
 }
 
 impl ConversationStore {
     pub async fn get(&mut self) -> Vec<Message> {
-        let db_messages =
-            sqlx::query_as::<_, DbMessage>("SELECT * FROM messages WHERE conversation_id = ?")
-                .bind(self.conv_id)
-                .fetch_all(&mut self.conn)
-                .await
-                .unwrap();
-        let messages = db_messages
+        let db_messages = message::Entity::find()
+            .filter(message::Column::ConversationId.eq(self.conv_id))
+            .all(&self.db)
+            .await
+            .unwrap();
+        db_messages
             .into_iter()
             .map(|db_message| match db_message.role.as_str() {
                 "system" => Message::System {
@@ -280,38 +272,41 @@ impl ConversationStore {
                     content: db_message.content,
                     name: None,
                     tool_calls: db_message
-                        .tool_calls
-                        .map(|s| serde_json::from_str(&s).unwrap()),
+                        .payload
+                        .as_ref()
+                        .and_then(|p| p.get("tool_calls"))
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| {
+                            serde_json::from_value(Value::Array(arr.to_vec())).unwrap()
+                        }),
                 },
                 "tool" => Message::Tool {
                     content: db_message.content.unwrap_or_default(),
-                    tool_call_id: db_message.tool_call_id.unwrap_or_default(),
+                    tool_call_id: db_message
+                        .payload
+                        .as_ref()
+                        .and_then(|p| p.get("tool_call_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                 },
                 _ => {
                     panic!("Unknown role: {}", db_message.role)
                 }
             })
-            .collect::<Vec<Message>>();
-        messages
+            .collect::<Vec<Message>>()
     }
 
-    pub async fn append(
-        &mut self,
-        role: &str,
-        content: Option<String>,
-        tool_calls: Option<String>,
-        tool_call_id: Option<String>,
-    ) {
-        sqlx::query(
-            "INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(self.conv_id)
-        .bind(role)
-        .bind(content)
-        .bind(tool_calls)
-        .bind(tool_call_id)
-        .bind(Utc::now().timestamp())
-        .execute(&mut self.conn)
+    pub async fn append(&mut self, role: &str, content: Option<String>, payload: Option<Value>) {
+        message::Entity::insert(message::ActiveModel {
+            conversation_id: ActiveValue::Set(self.conv_id),
+            role: ActiveValue::Set(role.to_owned()),
+            content: ActiveValue::Set(content),
+            payload: ActiveValue::Set(payload),
+            created_at: ActiveValue::Set(Utc::now().timestamp()),
+            ..Default::default()
+        })
+        .exec(&self.db)
         .await
         .unwrap();
     }
