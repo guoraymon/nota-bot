@@ -27,9 +27,7 @@ use tokio::sync::mpsc;
 struct Config {
     app_id: String,
     client_secret: String,
-    #[serde(rename = "defaultProvider")]
     default_provider: String,
-    #[serde(rename = "defaultModel")]
     default_model: String,
     providers: HashMap<String, ProviderConfig>,
 }
