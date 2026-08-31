@@ -65,10 +65,23 @@ struct ClientProperties {
     device: String,
 }
 
-pub struct IncomingMessage {
-    pub user_openid: String,
-    pub msg_id: String,
+#[derive(Deserialize)]
+pub struct C2CMESSAGE {
+    pub id: String,
+    pub author: User,
     pub content: String,
+    pub attachments: Option<Vec<MessageAttachment>>,
+}
+
+#[derive(Deserialize)]
+pub struct User {
+    pub user_openid: String,
+}
+
+#[derive(Deserialize)]
+pub struct MessageAttachment {
+    pub url: String,
+    pub content_type: String,
 }
 
 pub struct Bot {
@@ -87,7 +100,7 @@ impl Bot {
         }
     }
 
-    pub async fn run(&mut self, tx: Sender<IncomingMessage>) {
+    pub async fn run(&mut self, tx: Sender<C2CMESSAGE>) {
         let mut attempt = 0;
         loop {
             if attempt > 0 {
@@ -184,14 +197,9 @@ impl Bot {
                                                 }
                                                 "C2C_MESSAGE_CREATE" => {
                                                     println!("[bot.run]dispatch C2C_MESSAGE_CREATE: {}", payload.d);
-                                                    let user_openid = payload.d["author"]["user_openid"].as_str().unwrap();
-                                                    let msg_id = payload.d["id"].as_str().unwrap();
-                                                    let content = payload.d["content"].as_str().unwrap();
-                                                    let _ = tx.send(IncomingMessage {
-                                                        content:content.to_owned(),
-                                                        user_openid: user_openid.to_owned(),
-                                                        msg_id: msg_id.to_owned()
-                                                    }).await;
+                                                    if let Ok(message) = serde_json::from_value::<C2CMESSAGE>(payload.d) {
+                                                        let _ = tx.send(message).await;
+                                                    }
                                                 }
                                                 _ => {}
                                             }

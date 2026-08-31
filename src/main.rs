@@ -9,7 +9,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{
     agent::{Agent, AgentMessage},
-    bot::{Bot, BotApi, IncomingMessage, TokenManager},
+    bot::{Bot, BotApi, C2CMESSAGE, TokenManager},
     entities::{conversation, message},
     llm::Message,
 };
@@ -157,14 +157,26 @@ async fn main() {
         conversation_store.get().await,
     );
 
-    let (tx, mut rx) = mpsc::channel::<IncomingMessage>(100);
+    let (tx, mut rx) = mpsc::channel::<C2CMESSAGE>(100);
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
+            let images = msg.attachments.as_ref().map(|attachments| {
+                attachments
+                    .iter()
+                    .filter(|attachment| {
+                        matches!(
+                            attachment.content_type.as_str(),
+                            "image/jpeg" | "image/png" | "image/gif"
+                        )
+                    })
+                    .map(|attachment| attachment.url.as_str())
+                    .collect()
+            });
             conversation_store
                 .append("user", Some(msg.content.to_string()), None)
                 .await;
             let mut last_content = None;
-            let result = agent.send(&msg.content).await;
+            let result = agent.send(&msg.content, images).await;
 
             let mut prompt_tokens = 0;
             let mut completion_tokens = 0;
@@ -232,7 +244,7 @@ async fn main() {
                     }
                 );
                 bot_api
-                    .send_user_msg(&msg.user_openid, &msg.msg_id, &content)
+                    .send_user_msg(&msg.author.user_openid, &msg.id, &content)
                     .await;
             }
         }
@@ -263,7 +275,7 @@ impl ConversationStore {
                     name: None,
                 },
                 "user" => Message::User {
-                    content: db_message.content.unwrap_or_default(),
+                    content: llm::UserContent::Text(db_message.content.unwrap_or_default()),
                     name: None,
                 },
                 "assistant" => Message::Assistant {

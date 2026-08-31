@@ -4,7 +4,10 @@ use reqwest::Client;
 use serde_json::Value;
 
 use crate::{
-    llm::{FinishReason::ToolCalls, Function, Message, Tool, ToolCall, Usage, completions},
+    llm::{
+        ContentPart, FinishReason::ToolCalls, Function, ImageUrl, Message, Tool, ToolCall, Usage,
+        UserContent, completions,
+    },
     tools::{Bash, Edit, Read, ToolHandler, Write},
 };
 
@@ -64,9 +67,24 @@ impl Agent {
         }
     }
 
-    pub async fn send(&mut self, content: &str) -> Vec<AgentMessage> {
+    pub async fn send(&mut self, content: &str, images: Option<Vec<&str>>) -> Vec<AgentMessage> {
         self.messages.push(Message::User {
-            content: content.to_owned(),
+            content: if let Some(images) = images {
+                let mut parts = vec![ContentPart::Text {
+                    text: content.to_owned(),
+                }];
+                for image in images {
+                    parts.push(ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: image.to_owned(),
+                            detail: "auto".to_owned(),
+                        },
+                    });
+                }
+                UserContent::Parts(parts)
+            } else {
+                UserContent::Text(content.to_owned())
+            },
             name: None,
         });
         self.agent_loop().await

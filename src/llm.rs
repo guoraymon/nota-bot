@@ -80,7 +80,7 @@ pub enum Message {
         name: Option<String>,
     },
     User {
-        content: String,
+        content: UserContent,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
@@ -97,6 +97,26 @@ pub enum Message {
         content: String,
         tool_call_id: String,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum UserContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
+    pub detail: String, // low, high, original, auto
 }
 
 // enum ReasoningEffort {
@@ -218,7 +238,7 @@ mod tests {
                     name: None,
                 },
                 Message::User {
-                    content: "Hello!".to_string(),
+                    content: UserContent::Text("Hello!".to_string()),
                     name: None,
                 },
             ],
@@ -248,7 +268,7 @@ mod tests {
         let req = Request {
             model: "deepseek-chat".to_string(),
             messages: vec![Message::User {
-                content: "Hi".to_string(),
+                content: UserContent::Text("Hi".to_string()),
                 name: Some("alice".to_string()),
             }],
             tools: None,
@@ -762,5 +782,116 @@ mod tests {
             err.contains("usage"),
             "error should mention usage, got: {err}"
         );
+    }
+
+    // ===== UserContent 多模态 =====
+
+    // 纯文本 user 消息序列化后 content 应保持字符串形态，不能被包装成数组
+    #[test]
+    fn serialize_user_content_string_stays_string() {
+        let req = Request {
+            model: "deepseek-chat".to_string(),
+            messages: vec![Message::User {
+                content: UserContent::Text("描述一下这张图片。".to_string()),
+                name: None,
+            }],
+            tools: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""content":"描述一下这张图片。""#),
+            "got: {json}"
+        );
+        assert!(!json.contains(r#""content":["#), "got: {json}");
+    }
+
+    // 带图片的 user 消息序列化为 content parts 数组，type tag 命名正确（text / image_url），
+    // ImageUrl 的 url 与 detail 字段都应输出
+    #[test]
+    fn serialize_user_content_parts() {
+        let req = Request {
+            model: "deepseek-chat".to_string(),
+            messages: vec![Message::User {
+                content: UserContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "描述一下这张图片。".to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "https://example.com/image.jpg".to_string(),
+                            detail: "auto".to_string(),
+                        },
+                    },
+                ]),
+                name: None,
+            }],
+            tools: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""content":["#), "got: {json}");
+        assert!(json.contains(r#""type":"text""#), "got: {json}");
+        assert!(
+            json.contains(r#""text":"描述一下这张图片。""#),
+            "got: {json}"
+        );
+        assert!(json.contains(r#""type":"image_url""#), "got: {json}");
+        assert!(
+            json.contains(r#""url":"https://example.com/image.jpg""#),
+            "got: {json}"
+        );
+        assert!(json.contains(r#""detail":"auto""#), "got: {json}");
+    }
+
+    // 两种形态反序列化往返无损：字符串 → Text，数组 → Parts，字段逐个核对
+    #[test]
+    fn deserialize_user_content_roundtrips_both_forms() {
+        let text = UserContent::Text("hi".to_string());
+        let json = serde_json::to_string(&text).unwrap();
+        match serde_json::from_str::<UserContent>(&json).unwrap() {
+            UserContent::Text(s) => assert_eq!(s, "hi"),
+            UserContent::Parts(_) => panic!("expected Text, got Parts"),
+        }
+
+        let parts = UserContent::Parts(vec![
+            ContentPart::Text {
+                text: "看图".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "https://x/y.png".to_string(),
+                    detail: "low".to_string(),
+                },
+            },
+        ]);
+        let json = serde_json::to_string(&parts).unwrap();
+        match serde_json::from_str::<UserContent>(&json).unwrap() {
+            UserContent::Parts(p) => {
+                assert_eq!(p.len(), 2);
+                match &p[0] {
+                    ContentPart::Text { text } => assert_eq!(text, "看图"),
+                    ContentPart::ImageUrl { .. } => panic!("expected text part"),
+                }
+                match &p[1] {
+                    ContentPart::ImageUrl { image_url } => {
+                        assert_eq!(image_url.url, "https://x/y.png");
+                        assert_eq!(image_url.detail, "low");
+                    }
+                    ContentPart::Text { .. } => panic!("expected image part"),
+                }
+            }
+            UserContent::Text(_) => panic!("expected Parts, got Text"),
+        }
+    }
+
+    // untagged 按形状分发：数组内容应落入 Parts 而不是报错
+    // （ConversationStore 从 payload 列还原 UserContent 依赖这一点）
+    #[test]
+    fn deserialize_user_content_array_selects_parts_variant() {
+        let raw = r#"[
+            {"type":"text","text":"hi"},
+            {"type":"image_url","image_url":{"url":"https://x","detail":"auto"}}
+        ]"#;
+        let parsed: UserContent = serde_json::from_str(raw).unwrap();
+        assert!(matches!(parsed, UserContent::Parts(_)));
     }
 }
