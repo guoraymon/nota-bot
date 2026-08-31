@@ -67,7 +67,11 @@ impl Agent {
         }
     }
 
-    pub async fn send(&mut self, content: &str, images: Option<Vec<&str>>) -> Vec<AgentMessage> {
+    pub async fn send(
+        &mut self,
+        content: &str,
+        images: Option<Vec<&str>>,
+    ) -> Result<Vec<AgentMessage>, String> {
         self.messages.push(Message::User {
             content: if let Some(images) = images {
                 let mut parts = vec![ContentPart::Text {
@@ -90,7 +94,7 @@ impl Agent {
         self.agent_loop().await
     }
 
-    async fn agent_loop(&mut self) -> Vec<AgentMessage> {
+    async fn agent_loop(&mut self) -> Result<Vec<AgentMessage>, String> {
         let mut result = vec![];
         loop {
             let (response, elapsed) = match completions(
@@ -106,7 +110,7 @@ impl Agent {
                 Ok(response) => response,
                 Err(e) => {
                     eprintln!("completions failed: {e}");
-                    return result;
+                    return Err(e);
                 }
             };
 
@@ -126,7 +130,7 @@ impl Agent {
 
                 // If the model is done, we're done.
                 if choice.finish_reason != ToolCalls {
-                    return result;
+                    return Ok(result);
                 }
 
                 if let Some(tool_calls) = &choice.message.tool_calls {

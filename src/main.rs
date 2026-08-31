@@ -176,7 +176,15 @@ async fn main() {
                 .append("user", Some(msg.content.to_string()), None)
                 .await;
             let mut last_content = None;
-            let result = agent.send(&msg.content, images).await;
+            let result = match agent.send(&msg.content, images).await {
+                Ok(events) => events,
+                Err(e) => {
+                    bot_api
+                        .send_user_msg(&msg.author.user_openid, &msg.id, &e)
+                        .await;
+                    continue;
+                }
+            };
 
             let mut prompt_tokens = 0;
             let mut completion_tokens = 0;
