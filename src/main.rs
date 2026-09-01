@@ -8,12 +8,14 @@ mod tools;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{
-    agent::{Agent, AgentMessage},
+    agent::{Agent, AgentMessage, Attachment},
     bot::{Bot, BotApi, C2CMESSAGE, TokenManager},
     entities::{conversation, message},
-    llm::Message,
+    llm::{ContentPart, ImageUrl, Message},
 };
+use base64::Engine;
 use chrono::Utc;
+use futures_util::future::join_all;
 use reqwest::Client;
 use sea_orm::{
     ActiveValue, ColumnTrait, ConnectionTrait, Database, DatabaseConnection, DbBackend,
@@ -160,23 +162,50 @@ async fn main() {
     let (tx, mut rx) = mpsc::channel::<C2CMESSAGE>(100);
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            let images = msg.attachments.as_ref().map(|attachments| {
-                attachments
-                    .iter()
-                    .filter(|attachment| {
-                        matches!(
-                            attachment.content_type.as_str(),
-                            "image/jpeg" | "image/png" | "image/gif"
-                        )
-                    })
-                    .map(|attachment| attachment.url.as_str())
-                    .collect()
-            });
+            let attachments = if let Some(attachments) = msg.attachments.as_ref() {
+                Some(
+                    join_all(
+                        attachments
+                            .iter()
+                            .filter(|attachment| {
+                                matches!(
+                                    attachment.content_type.as_str(),
+                                    "image/jpeg" | "image/png" | "image/gif"
+                                )
+                            })
+                            .map(async |attachment| {
+                                let response =
+                                    reqwest::get(attachment.url.to_owned()).await.ok()?;
+                                let bytes = response.bytes().await.ok()?;
+                                let base64 =
+                                    base64::engine::general_purpose::STANDARD.encode(bytes);
+                                Some(Attachment {
+                                    content_type: attachment.content_type.to_owned(),
+                                    data: base64,
+                                })
+                            }),
+                    )
+                    .await
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+                )
+            } else {
+                None
+            };
             conversation_store
-                .append("user", Some(msg.content.to_string()), None)
+                .append(
+                    "user",
+                    Some(msg.content.to_string()),
+                    if attachments.is_some() {
+                        Some(json!({ "attachments": attachments }))
+                    } else {
+                        None
+                    },
+                )
                 .await;
             let mut last_content = None;
-            let result = match agent.send(&msg.content, images).await {
+            let result = match agent.send(&msg.content, attachments.as_ref()).await {
                 Ok(events) => events,
                 Err(e) => {
                     bot_api
@@ -283,7 +312,28 @@ impl ConversationStore {
                     name: None,
                 },
                 "user" => Message::User {
-                    content: llm::UserContent::Text(db_message.content.unwrap_or_default()),
+                    content: match db_message
+                        .payload
+                        .as_ref()
+                        .and_then(|p| p.get("attachments"))
+                        .and_then(|v| serde_json::from_value::<Vec<Attachment>>(v.clone()).ok())
+                    {
+                        Some(attachments) if !attachments.is_empty() => {
+                            let mut parts = vec![ContentPart::Text {
+                                text: db_message.content.unwrap_or_default(),
+                            }];
+                            for attachment in attachments {
+                                parts.push(ContentPart::ImageUrl {
+                                    image_url: ImageUrl {
+                                        url: attachment.get_url(),
+                                        detail: "auto".to_owned(),
+                                    },
+                                });
+                            }
+                            llm::UserContent::Parts(parts)
+                        }
+                        _ => llm::UserContent::Text(db_message.content.unwrap_or_default()),
+                    },
                     name: None,
                 },
                 "assistant" => Message::Assistant {

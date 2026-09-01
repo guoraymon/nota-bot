@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
@@ -70,17 +71,17 @@ impl Agent {
     pub async fn send(
         &mut self,
         content: &str,
-        images: Option<Vec<&str>>,
+        attachments: Option<&Vec<Attachment>>,
     ) -> Result<Vec<AgentMessage>, String> {
         self.messages.push(Message::User {
-            content: if let Some(images) = images {
+            content: if let Some(attachments) = attachments {
                 let mut parts = vec![ContentPart::Text {
                     text: content.to_owned(),
                 }];
-                for image in images {
+                for attachment in attachments {
                     parts.push(ContentPart::ImageUrl {
                         image_url: ImageUrl {
-                            url: image.to_owned(),
+                            url: attachment.get_url(),
                             detail: "auto".to_owned(),
                         },
                     });
@@ -172,4 +173,16 @@ pub enum AgentMessage {
         content: String,
         tool_call_id: String,
     },
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct Attachment {
+    pub content_type: String,
+    pub data: String,
+}
+
+impl Attachment {
+    pub fn get_url(&self) -> String {
+        format!("data:{};base64,{}", self.content_type, self.data)
+    }
 }
