@@ -16,9 +16,8 @@ use crate::{
     entities::{conversation, message},
     store::Store,
 };
-use chrono::Utc;
 use reqwest::Client;
-use sea_orm::{ActiveValue, ConnectionTrait, Database, DbBackend, EntityTrait, Schema};
+use sea_orm::{ConnectionTrait, Database, DbBackend, Schema};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -71,63 +70,6 @@ async fn main() {
     .await
     .unwrap();
 
-    let conversation = conversation::Entity::find()
-        .order_by_id_desc()
-        .one(&db)
-        .await
-        .unwrap();
-    if conversation.is_none() {
-        conversation::Entity::insert(conversation::ActiveModel {
-            created_at: ActiveValue::Set(Utc::now().timestamp()),
-            ..Default::default()
-        })
-        .exec(&db)
-        .await
-        .unwrap();
-        let conversation = conversation::Entity::find().one(&db).await.unwrap();
-
-        let avaliable_skills = skills::find_skills(&nota_agent_home.join("skills"))
-            .iter()
-            .map(|skill| {
-                format!(
-                    "<skill>
-                            <name>{}</name>
-                            <description>{}</description>
-                            <location>{}</location>
-                        </skill>",
-                    skill.name, skill.description, skill.location
-                )
-            })
-            .collect::<Vec<String>>()
-            .join("\n");
-        let skill_prompt = format!(
-            "The following skills provide specialized instructions...
-                Use the read tool to load a skill's file when the task matches its description.
-
-                <available_skills>
-                    {avaliable_skills}
-                </available_skills>"
-        );
-        let system_prompt = format!("You are a helpful assistant.\n{skill_prompt}");
-        if let Some(conversation) = conversation {
-            message::Entity::insert(message::ActiveModel {
-                conversation_id: ActiveValue::Set(conversation.id),
-                role: ActiveValue::Set("system".to_owned()),
-                content: ActiveValue::Set(Some(system_prompt.to_owned())),
-                payload: ActiveValue::NotSet,
-                created_at: ActiveValue::Set(Utc::now().timestamp()),
-                ..Default::default()
-            })
-            .exec(&db)
-            .await
-            .unwrap();
-        } else {
-            eprintln!("conversation init error");
-        }
-    }
-
-    let conv_id: i64 = conversation.unwrap().id;
-
     let content = std::fs::read_to_string(nota_agent_home.join("config.json")).unwrap();
     let config: Config = serde_json::from_str(&content).unwrap();
     let default_provider = config
@@ -149,6 +91,22 @@ async fn main() {
     let bot_api = BotApi::new(&client, token_manager.clone());
 
     let mut store = Store { db };
+    let conversation = store.get_last_conversation().await;
+    let conv_id = if let Some(conversation) = conversation {
+        conversation.id
+    } else {
+        let conv_id = store.new_conversation().await;
+        store
+            .insert_message(
+                conv_id,
+                "system",
+                Some(App::get_system_prompt(&nota_agent_home)),
+                None,
+            )
+            .await;
+        conv_id
+    };
+
     let agent: Agent = Agent::new(
         default_provider.url.clone(),
         default_provider.key.clone(),
@@ -157,6 +115,7 @@ async fn main() {
     );
 
     let mut app = App {
+        home_path: nota_agent_home,
         store,
         conv_id,
         bot_api,

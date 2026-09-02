@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{
     agent::Attachment,
-    entities::message,
+    entities::{conversation, message},
     llm::{self, ContentPart, ImageUrl, Message},
 };
 
@@ -13,6 +13,25 @@ pub struct Store {
 }
 
 impl Store {
+    pub async fn new_conversation(&self) -> i64 {
+        let conversation = conversation::Entity::insert(conversation::ActiveModel {
+            created_at: ActiveValue::Set(Utc::now().timestamp()),
+            ..Default::default()
+        })
+        .exec(&self.db)
+        .await
+        .unwrap();
+        conversation.last_insert_id
+    }
+
+    pub async fn get_last_conversation(&self) -> Option<conversation::Model> {
+        conversation::Entity::find()
+            .order_by_id_desc()
+            .one(&self.db)
+            .await
+            .unwrap()
+    }
+
     pub async fn get_messages(&mut self, conv_id: i64) -> Vec<Message> {
         let db_messages = message::Entity::find()
             .filter(message::Column::ConversationId.eq(conv_id))

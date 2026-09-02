@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use base64::Engine;
 use futures_util::future::join_all;
@@ -7,10 +10,12 @@ use serde_json::json;
 use crate::{
     agent::{Agent, AgentMessage, Attachment},
     bot::{BotApi, C2CMESSAGE},
+    skills,
     store::Store,
 };
 
 pub struct App {
+    pub home_path: PathBuf,
     pub store: Store,
     pub conv_id: i64,
     pub agent: Agent,
@@ -18,7 +23,61 @@ pub struct App {
 }
 
 impl App {
+    pub fn get_system_prompt(home_path: &Path) -> String {
+        let skill_prompt = format!(
+            "The following skills provide specialized instructions...
+                Use the read tool to load a skill's file when the task matches its description.
+
+                <available_skills>
+                    {}
+                </available_skills>",
+            skills::find_skills(&home_path.join("skills"))
+                .iter()
+                .map(|skill| {
+                    format!(
+                        "<skill>
+                        <name>{}</name>
+                        <description>{}</description>
+                        <location>{}</location>
+                    </skill>",
+                        skill.name, skill.description, skill.location
+                    )
+                })
+                .collect::<Vec<String>>()
+                .join("\n")
+        );
+        format!("You are a helpful assistant.\n{skill_prompt}")
+    }
+
     pub async fn handle_msg(&mut self, msg: C2CMESSAGE) {
+        if msg.content.starts_with('/') {
+            match msg.content.as_str() {
+                "/new" => {
+                    self.conv_id = self.store.new_conversation().await;
+                    self.store
+                        .insert_message(
+                            self.conv_id,
+                            "system",
+                            Some(App::get_system_prompt(&self.home_path)),
+                            None,
+                        )
+                        .await;
+                    self.agent
+                        .reset(self.store.get_messages(self.conv_id).await);
+
+                    self.bot_api
+                        .send_user_msg(&msg.author.user_openid, &msg.id, "已开启新对话")
+                        .await;
+                    return;
+                }
+                _ => {
+                    self.bot_api
+                        .send_user_msg(&msg.author.user_openid, &msg.id, "暂不支持的命令")
+                        .await;
+                }
+            }
+        }
+
         let attachments = if let Some(attachments) = msg.attachments.as_ref() {
             Some(
                 join_all(

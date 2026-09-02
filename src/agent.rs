@@ -68,6 +68,10 @@ impl Agent {
         }
     }
 
+    pub fn reset(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+    }
+
     pub async fn send(
         &mut self,
         content: &str,
