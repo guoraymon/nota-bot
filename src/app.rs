@@ -63,7 +63,6 @@ impl App {
                     self.bot_api
                         .send_user_msg(&msg.author.user_openid, &msg.id, "已开启新对话")
                         .await;
-                    return;
                 }
                 _ => {
                     self.bot_api
@@ -71,6 +70,7 @@ impl App {
                         .await;
                 }
             }
+            return;
         }
 
         let attachments = if let Some(attachments) = msg.attachments.as_ref() {
