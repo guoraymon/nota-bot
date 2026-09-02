@@ -1,28 +1,25 @@
 mod agent;
+mod app;
 mod bot;
 mod entities;
 mod llm;
 mod skills;
+mod store;
 mod tools;
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    agent::{Agent, AgentMessage, Attachment},
+    agent::Agent,
+    app::App,
     bot::{Bot, BotApi, C2CMESSAGE, TokenManager},
     entities::{conversation, message},
-    llm::{ContentPart, ImageUrl, Message},
+    store::Store,
 };
-use base64::Engine;
 use chrono::Utc;
-use futures_util::future::join_all;
 use reqwest::Client;
-use sea_orm::{
-    ActiveValue, ColumnTrait, ConnectionTrait, Database, DatabaseConnection, DbBackend,
-    EntityTrait, QueryFilter, Schema,
-};
+use sea_orm::{ActiveValue, ConnectionTrait, Database, DbBackend, EntityTrait, Schema};
 use serde::Deserialize;
-use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 #[derive(Deserialize)]
@@ -151,231 +148,28 @@ async fn main() {
     let mut bot = Bot::new(&client, token_manager.clone());
     let bot_api = BotApi::new(&client, token_manager.clone());
 
-    let mut conversation_store = ConversationStore { db, conv_id };
-    let mut agent: Agent = Agent::new(
+    let mut store = Store { db };
+    let agent: Agent = Agent::new(
         default_provider.url.clone(),
         default_provider.key.clone(),
         default_model.model.clone(),
-        conversation_store.get().await,
+        store.get_messages(conv_id).await,
     );
 
+    let mut app = App {
+        store,
+        conv_id,
+        bot_api,
+        agent,
+    };
     let (tx, mut rx) = mpsc::channel::<C2CMESSAGE>(100);
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            let attachments = if let Some(attachments) = msg.attachments.as_ref() {
-                Some(
-                    join_all(
-                        attachments
-                            .iter()
-                            .filter(|attachment| {
-                                matches!(
-                                    attachment.content_type.as_str(),
-                                    "image/jpeg" | "image/png" | "image/gif"
-                                )
-                            })
-                            .map(async |attachment| {
-                                let response =
-                                    reqwest::get(attachment.url.to_owned()).await.ok()?;
-                                let bytes = response.bytes().await.ok()?;
-                                let base64 =
-                                    base64::engine::general_purpose::STANDARD.encode(bytes);
-                                Some(Attachment {
-                                    content_type: attachment.content_type.to_owned(),
-                                    data: base64,
-                                })
-                            }),
-                    )
-                    .await
-                    .into_iter()
-                    .flatten()
-                    .collect(),
-                )
-            } else {
-                None
-            };
-            conversation_store
-                .append(
-                    "user",
-                    Some(msg.content.to_string()),
-                    if attachments.is_some() {
-                        Some(json!({ "attachments": attachments }))
-                    } else {
-                        None
-                    },
-                )
-                .await;
-            let mut last_content = None;
-            let result = match agent.send(&msg.content, attachments.as_ref()).await {
-                Ok(events) => events,
-                Err(e) => {
-                    bot_api
-                        .send_user_msg(&msg.author.user_openid, &msg.id, &e)
-                        .await;
-                    continue;
-                }
-            };
-
-            let mut prompt_tokens = 0;
-            let mut completion_tokens = 0;
-            let mut cached_tokens = 0;
-            let mut total_elapsed = Duration::new(0, 0);
-
-            for message in result {
-                match message {
-                    AgentMessage::Assistant {
-                        content,
-                        tool_calls,
-                        usage,
-                        elapsed,
-                    } => {
-                        conversation_store
-                            .append(
-                                "assistant",
-                                Some(content.clone()),
-                                Some(json!({"tool_calls": tool_calls})),
-                            )
-                            .await;
-
-                        last_content = Some(content);
-
-                        if let Some(usage) = usage {
-                            prompt_tokens += usage.prompt_tokens;
-                            completion_tokens += usage.completion_tokens;
-                            if let Some(hit_tokens) = usage.prompt_cache_hit_tokens {
-                                cached_tokens += hit_tokens;
-                            } else if let Some(prompt_tokens_details) = usage.prompt_tokens_details
-                            {
-                                cached_tokens += prompt_tokens_details.cached_tokens;
-                            }
-                        }
-
-                        total_elapsed += elapsed;
-                    }
-                    AgentMessage::Tool {
-                        content,
-                        tool_call_id,
-                    } => {
-                        conversation_store
-                            .append(
-                                "tool",
-                                Some(content.clone()),
-                                Some(json!({"tool_call_id": tool_call_id})),
-                            )
-                            .await;
-                    }
-                }
-            }
-
-            if let Some(last_content) = last_content {
-                let content = format!(
-                    "{last_content}\n\n> {:.1} tok/s ↑{prompt_tokens} ↓{completion_tokens} CH{:.2}%",
-                    if total_elapsed.as_secs_f64() > 0.0 {
-                        completion_tokens as f64 / total_elapsed.as_secs_f64()
-                    } else {
-                        0.0
-                    },
-                    if cached_tokens > 0 {
-                        cached_tokens as f64 / prompt_tokens as f64 * 100f64
-                    } else {
-                        0f64
-                    }
-                );
-                bot_api
-                    .send_user_msg(&msg.author.user_openid, &msg.id, &content)
-                    .await;
-            }
+            app.handle_msg(msg).await;
         }
     });
 
     bot.run(tx).await;
 
     return;
-}
-
-struct ConversationStore {
-    db: DatabaseConnection,
-    conv_id: i64,
-}
-
-impl ConversationStore {
-    pub async fn get(&mut self) -> Vec<Message> {
-        let db_messages = message::Entity::find()
-            .filter(message::Column::ConversationId.eq(self.conv_id))
-            .all(&self.db)
-            .await
-            .unwrap();
-        db_messages
-            .into_iter()
-            .map(|db_message| match db_message.role.as_str() {
-                "system" => Message::System {
-                    content: db_message.content.unwrap_or_default(),
-                    name: None,
-                },
-                "user" => Message::User {
-                    content: match db_message
-                        .payload
-                        .as_ref()
-                        .and_then(|p| p.get("attachments"))
-                        .and_then(|v| serde_json::from_value::<Vec<Attachment>>(v.clone()).ok())
-                    {
-                        Some(attachments) if !attachments.is_empty() => {
-                            let mut parts = vec![ContentPart::Text {
-                                text: db_message.content.unwrap_or_default(),
-                            }];
-                            for attachment in attachments {
-                                parts.push(ContentPart::ImageUrl {
-                                    image_url: ImageUrl {
-                                        url: attachment.get_url(),
-                                        detail: "auto".to_owned(),
-                                    },
-                                });
-                            }
-                            llm::UserContent::Parts(parts)
-                        }
-                        _ => llm::UserContent::Text(db_message.content.unwrap_or_default()),
-                    },
-                    name: None,
-                },
-                "assistant" => Message::Assistant {
-                    content: db_message.content,
-                    name: None,
-                    tool_calls: db_message
-                        .payload
-                        .as_ref()
-                        .and_then(|p| p.get("tool_calls"))
-                        .and_then(|v| v.as_array())
-                        .and_then(|arr| {
-                            serde_json::from_value(Value::Array(arr.to_vec())).unwrap()
-                        }),
-                },
-                "tool" => Message::Tool {
-                    content: db_message.content.unwrap_or_default(),
-                    tool_call_id: db_message
-                        .payload
-                        .as_ref()
-                        .and_then(|p| p.get("tool_call_id"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                },
-                _ => {
-                    panic!("Unknown role: {}", db_message.role)
-                }
-            })
-            .collect::<Vec<Message>>()
-    }
-
-    pub async fn append(&mut self, role: &str, content: Option<String>, payload: Option<Value>) {
-        message::Entity::insert(message::ActiveModel {
-            conversation_id: ActiveValue::Set(self.conv_id),
-            role: ActiveValue::Set(role.to_owned()),
-            content: ActiveValue::Set(content),
-            payload: ActiveValue::Set(payload),
-            created_at: ActiveValue::Set(Utc::now().timestamp()),
-            ..Default::default()
-        })
-        .exec(&self.db)
-        .await
-        .unwrap();
-    }
 }
