@@ -125,6 +125,7 @@ impl App {
             }
         };
 
+        let mut steps = 0;
         let mut prompt_tokens = 0;
         let mut completion_tokens = 0;
         let mut cached_tokens = 0;
@@ -149,6 +150,7 @@ impl App {
 
                     last_content = Some(content);
 
+                    steps += 1;
                     if let Some(usage) = usage {
                         prompt_tokens += usage.prompt_tokens;
                         completion_tokens += usage.completion_tokens;
@@ -179,7 +181,7 @@ impl App {
 
         if let Some(last_content) = last_content {
             let content = format!(
-                "{last_content}\n\n> {:.1} tok/s ↑{prompt_tokens} ↓{completion_tokens} CH{:.2}%",
+                "{last_content}\n\n> {steps} steps {:.1} tok/s ↑{prompt_tokens} ↓{completion_tokens} CH{:.2}%",
                 if total_elapsed.as_secs_f64() > 0.0 {
                     completion_tokens as f64 / total_elapsed.as_secs_f64()
                 } else {
