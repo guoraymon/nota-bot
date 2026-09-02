@@ -127,7 +127,7 @@ impl Agent {
                 });
 
                 result.push(AgentMessage::Assistant {
-                    content: choice.message.content.clone().unwrap_or_default(),
+                    content: choice.message.content.clone(),
                     tool_calls: choice.message.tool_calls.clone(),
                     usage: Some(response.usage),
                     elapsed,
@@ -168,7 +168,7 @@ impl Agent {
 
 pub enum AgentMessage {
     Assistant {
-        content: String,
+        content: Option<String>,
         tool_calls: Option<Vec<ToolCall>>,
         usage: Option<Usage>,
         elapsed: Duration,

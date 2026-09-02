@@ -143,12 +143,12 @@ impl App {
                         .insert_message(
                             self.conv_id,
                             "assistant",
-                            Some(content.clone()),
+                            content.clone(),
                             Some(json!({"tool_calls": tool_calls})),
                         )
                         .await;
 
-                    last_content = Some(content);
+                    last_content = content;
 
                     steps += 1;
                     if let Some(usage) = usage {
