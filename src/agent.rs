@@ -16,7 +16,7 @@ pub struct Agent {
     client: Client,
     api_url: String,
     api_key: String,
-    model: String,
+    pub model: String,
     messages: Vec<Message>,
     tools: Option<Vec<Tool>>,
 }

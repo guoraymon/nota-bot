@@ -181,7 +181,7 @@ impl App {
 
         if let Some(last_content) = last_content {
             let content = format!(
-                "{last_content}\n\n> {steps} steps {:.1} tok/s ↑{prompt_tokens} ↓{completion_tokens} CH{:.2}%",
+                "{last_content}\n\n> {steps} steps {:.1} tok/s ↑{prompt_tokens} ↓{completion_tokens} CH{:.2}% ¥{:.4}",
                 if total_elapsed.as_secs_f64() > 0.0 {
                     completion_tokens as f64 / total_elapsed.as_secs_f64()
                 } else {
@@ -191,7 +191,10 @@ impl App {
                     cached_tokens as f64 / prompt_tokens as f64 * 100f64
                 } else {
                     0f64
-                }
+                },
+                (cached_tokens as f64 * 0.1 / 1_000_000.0)
+                    + ((prompt_tokens - cached_tokens) as f64 * 3.0 / 1_000_000.0)
+                    + (completion_tokens as f64 * 9.0 / 1_000_000.0)
             );
             self.bot_api
                 .send_user_msg(&msg.author.user_openid, &msg.id, &content)
