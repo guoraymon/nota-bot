@@ -25,21 +25,16 @@ pub struct App {
 impl App {
     pub fn get_system_prompt(home_path: &Path) -> String {
         let skill_prompt = format!(
-            "The following skills provide specialized instructions...
-                Use the read tool to load a skill's file when the task matches its description.
-
-                <available_skills>
-                    {}
-                </available_skills>",
+            "The following skills provide specialized instructions...\n\
+            Use the read tool to load a skill's file when the task matches its description.\n\
+            <available_skills>\n\
+            {}\n\
+            </available_skills>",
             skills::find_skills(&home_path.join("skills"))
                 .iter()
                 .map(|skill| {
                     format!(
-                        "<skill>
-                        <name>{}</name>
-                        <description>{}</description>
-                        <location>{}</location>
-                    </skill>",
+                        "<skill>\n  <name>{}</name>\n  <description>{}</description>\n  <location>{}</location>\n</skill>",
                         skill.name, skill.description, skill.location
                     )
                 })
