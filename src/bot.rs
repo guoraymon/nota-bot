@@ -292,8 +292,10 @@ impl BotApi {
 
     pub async fn send_user_msg(&self, user_openid: &str, msg_id: &str, content: &str) {
         let json = serde_json::json!({
-            "content": content,
-            "msg_type": 0,
+            "msg_type": 2,
+            "markdown": {
+                "content": content
+            },
             "msg_id": msg_id,
         });
         println!("send_user_msg: {json}");

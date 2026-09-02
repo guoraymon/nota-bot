@@ -268,7 +268,8 @@ async fn main() {
 
             if let Some(last_content) = last_content {
                 let content = format!(
-                    "{last_content}\n\nTPS {:.1} tok/s ↑{prompt_tokens} ↓{completion_tokens} CH{:.2}%",
+                    "{last_content}\n\n> {}s {:.1} tok/s ↑{prompt_tokens} ↓{completion_tokens} CH{:.2}%",
+                    total_elapsed.as_secs(),
                     if total_elapsed.as_secs_f64() > 0.0 {
                         completion_tokens as f64 / total_elapsed.as_secs_f64()
                     } else {
