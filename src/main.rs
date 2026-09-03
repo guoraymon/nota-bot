@@ -1,46 +1,26 @@
 mod agent;
 mod app;
 mod bot;
+mod config;
 mod entities;
 mod llm;
 mod skills;
 mod store;
 mod tools;
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     agent::Agent,
     app::App,
     bot::{Bot, BotApi, C2CMESSAGE, TokenManager},
+    config::Config,
     entities::{conversation, message},
     store::Store,
 };
 use reqwest::Client;
 use sea_orm::{ConnectionTrait, Database, DbBackend, Schema};
-use serde::Deserialize;
 use tokio::sync::mpsc;
-
-#[derive(Deserialize)]
-struct Config {
-    app_id: String,
-    client_secret: String,
-    default_provider: String,
-    default_model: String,
-    providers: HashMap<String, ProviderConfig>,
-}
-
-#[derive(Deserialize)]
-struct ProviderConfig {
-    url: String,
-    key: String,
-    models: HashMap<String, ModelConfig>,
-}
-
-#[derive(Deserialize)]
-struct ModelConfig {
-    model: String,
-}
 
 #[tokio::main]
 async fn main() {
@@ -72,14 +52,6 @@ async fn main() {
 
     let content = std::fs::read_to_string(nota_agent_home.join("config.json")).unwrap();
     let config: Config = serde_json::from_str(&content).unwrap();
-    let default_provider = config
-        .providers
-        .get(&config.default_provider)
-        .expect("default provider error");
-    let default_model = default_provider
-        .models
-        .get(&config.default_model)
-        .expect("default model error");
 
     let client = Client::new();
     let token_manager = Arc::new(TokenManager::new(
@@ -107,6 +79,10 @@ async fn main() {
         conv_id
     };
 
+    let default_provider = config
+        .get_default_provider()
+        .expect("get default provider error");
+    let default_model = config.get_default_model().expect("get default model error");
     let agent: Agent = Agent::new(
         default_provider.url.clone(),
         default_provider.key.clone(),
@@ -120,6 +96,7 @@ async fn main() {
         conv_id,
         bot_api,
         agent,
+        config,
     };
     let (tx, mut rx) = mpsc::channel::<C2CMESSAGE>(100);
     tokio::spawn(async move {

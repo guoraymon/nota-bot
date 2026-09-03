@@ -8,6 +8,7 @@ use futures_util::future::join_all;
 use serde_json::json;
 
 use crate::{
+    Config,
     agent::{Agent, AgentMessage, Attachment},
     bot::{BotApi, C2CMESSAGE},
     skills,
@@ -20,6 +21,7 @@ pub struct App {
     pub conv_id: i64,
     pub agent: Agent,
     pub bot_api: BotApi,
+    pub config: Config,
 }
 
 impl App {
@@ -180,8 +182,8 @@ impl App {
         }
 
         if let Some(last_content) = last_content {
-            let content = format!(
-                "{last_content}\n\n> {steps} steps {:.1} tok/s ↑{prompt_tokens} ↓{completion_tokens} CH{:.2}% ¥{:.4}",
+            let mut content = format!(
+                "{last_content}\n\n> {steps} steps {:.1} tok/s ↑{prompt_tokens} ↓{completion_tokens} CH{:.2}%",
                 if total_elapsed.as_secs_f64() > 0.0 {
                     completion_tokens as f64 / total_elapsed.as_secs_f64()
                 } else {
@@ -191,11 +193,20 @@ impl App {
                     cached_tokens as f64 / prompt_tokens as f64 * 100f64
                 } else {
                     0f64
-                },
-                (cached_tokens as f64 * 0.1 / 1_000_000.0)
-                    + ((prompt_tokens - cached_tokens) as f64 * 3.0 / 1_000_000.0)
-                    + (completion_tokens as f64 * 9.0 / 1_000_000.0)
+                }
             );
+            if let Some(price) = self
+                .config
+                .get_default_model()
+                .and_then(|m| m.price.as_ref())
+            {
+                content += &format!(
+                    " ¥{:.4}",
+                    (cached_tokens as f64 * price.input_hit / 1_000_000.0)
+                        + ((prompt_tokens - cached_tokens) as f64 * price.input_miss / 1_000_000.0)
+                        + (completion_tokens as f64 * price.output / 1_000_000.0)
+                );
+            }
             self.bot_api
                 .send_user_msg(&msg.author.user_openid, &msg.id, &content)
                 .await;
