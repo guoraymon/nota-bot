@@ -46,9 +46,10 @@ impl App {
         format!("You are a helpful assistant.\n{skill_prompt}")
     }
 
-    pub async fn handle_msg(&mut self, msg: C2CMESSAGE) {
+    pub async fn handle_msg(&mut self, msg: &C2CMESSAGE) -> Result<String, String> {
         if msg.content.starts_with('/') {
-            match msg.content.as_str() {
+            let (command, args) = msg.content.split_once(' ').unwrap_or((&msg.content, ""));
+            match command {
                 "/new" => {
                     self.conv_id = self.store.new_conversation().await;
                     self.store
@@ -62,17 +63,44 @@ impl App {
                     self.agent
                         .reset(self.store.get_messages(self.conv_id).await);
 
-                    self.bot_api
-                        .send_user_msg(&msg.author.user_openid, &msg.id, "已开启新对话")
-                        .await;
+                    return Ok("已开启新对话".to_string());
+                }
+                "/model" => {
+                    let Some((provider_str, model_str)) = args.split_once('/') else {
+                        return Err("用法：/model <provider>/<model>".to_string());
+                    };
+                    if !self.config.providers.contains_key(provider_str)
+                        || !self.config.providers[provider_str]
+                            .models
+                            .contains_key(model_str)
+                    {
+                        return Err(format!("未找到模型 {provider_str}/{model_str}"));
+                    }
+
+                    let mut reply = format!("模型已切换 {provider_str}/{model_str}");
+
+                    self.config.set_default_provider(provider_str);
+                    self.config.set_default_model(model_str);
+                    if let Err(e) = self.config.save(self.home_path.join("config.json")).await {
+                        reply += &format!("\n⚠️ 配置保存失败，重启后将还原: {e}");
+                    }
+
+                    let provider = self.config.get_default_provider().unwrap();
+                    let model = self.config.get_default_model().unwrap();
+
+                    self.agent = Agent::new(
+                        provider.url.to_owned(),
+                        provider.key.to_owned(),
+                        model.model.to_owned(),
+                        self.agent.messages.clone(),
+                    );
+
+                    return Ok(reply);
                 }
                 _ => {
-                    self.bot_api
-                        .send_user_msg(&msg.author.user_openid, &msg.id, "暂不支持的命令")
-                        .await;
+                    return Err("暂不支持的命令".to_string());
                 }
             }
-            return;
         }
 
         let attachments = if let Some(attachments) = msg.attachments.as_ref() {
@@ -120,10 +148,7 @@ impl App {
         let result = match self.agent.send(&msg.content, attachments.as_ref()).await {
             Ok(events) => events,
             Err(e) => {
-                self.bot_api
-                    .send_user_msg(&msg.author.user_openid, &msg.id, &e)
-                    .await;
-                return;
+                return Err(e);
             }
         };
 
@@ -207,9 +232,9 @@ impl App {
                         + (completion_tokens as f64 * price.output / 1_000_000.0)
                 );
             }
-            self.bot_api
-                .send_user_msg(&msg.author.user_openid, &msg.id, &content)
-                .await;
+            Ok(content)
+        } else {
+            Err("no last content".to_string())
         }
     }
 }

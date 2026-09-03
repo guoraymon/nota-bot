@@ -50,8 +50,7 @@ async fn main() {
     .await
     .unwrap();
 
-    let content = std::fs::read_to_string(nota_agent_home.join("config.json")).unwrap();
-    let config: Config = serde_json::from_str(&content).unwrap();
+    let config = Config::load(nota_agent_home.join("config.json"));
 
     let client = Client::new();
     let token_manager = Arc::new(TokenManager::new(
@@ -101,7 +100,18 @@ async fn main() {
     let (tx, mut rx) = mpsc::channel::<C2CMESSAGE>(100);
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            app.handle_msg(msg).await;
+            match app.handle_msg(&msg).await {
+                Ok(content) => {
+                    app.bot_api
+                        .send_user_msg(&msg.author.user_openid, &msg.id, &content)
+                        .await;
+                }
+                Err(e) => {
+                    app.bot_api
+                        .send_user_msg(&msg.author.user_openid, &msg.id, &e)
+                        .await;
+                }
+            }
         }
     });
 
